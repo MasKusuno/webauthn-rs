@@ -208,21 +208,44 @@ impl EDDSACurve {
 }
 */
 
+/// Hash `input` with the digest implied by the COSE signing algorithm `alg`.
+///
+/// Used by the TPM attestation verifier (WebAuthn §8.3 step "Verify that
+/// extraData is set to the hash of attToBeSigned using the hash algorithm
+/// employed in alg"). The hash size maps directly off the alg:
+///
+/// * `ES256` / `RS256` / `PS256` → SHA-256
+/// * `ES384` / `RS384` / `PS384` → SHA-384
+/// * `ES512` / `RS512` / `PS512` → SHA-512
+///
+/// `INSECURE_RS1` is explicitly rejected — civid and upstream webauthn-rs
+/// both refuse to hash over SHA-1. `EDDSA` and `PinUvProtocol` do not
+/// appear in TPM signing algorithms and return `COSEKeyInvalidType`.
 pub(crate) fn only_hash_from_type(
     alg: COSEAlgorithm,
-    _input: &[u8],
+    input: &[u8],
 ) -> Result<Vec<u8>, WebauthnError> {
-    match alg {
+    let md = match alg {
+        COSEAlgorithm::ES256 | COSEAlgorithm::RS256 | COSEAlgorithm::PS256 => {
+            hash::MessageDigest::sha256()
+        }
+        COSEAlgorithm::ES384 | COSEAlgorithm::RS384 | COSEAlgorithm::PS384 => {
+            hash::MessageDigest::sha384()
+        }
+        COSEAlgorithm::ES512 | COSEAlgorithm::RS512 | COSEAlgorithm::PS512 => {
+            hash::MessageDigest::sha512()
+        }
         COSEAlgorithm::INSECURE_RS1 => {
-            // sha1
             warn!("INSECURE SHA1 USAGE DETECTED");
-            Err(WebauthnError::CredentialInsecureCryptography)
+            return Err(WebauthnError::CredentialInsecureCryptography);
         }
         c_alg => {
             debug!(?c_alg, "WebauthnError::COSEKeyInvalidType");
-            Err(WebauthnError::COSEKeyInvalidType)
+            return Err(WebauthnError::COSEKeyInvalidType);
         }
-    }
+    };
+    let digest = hash::hash(md, input).map_err(WebauthnError::OpenSSLError)?;
+    Ok(digest.to_vec())
 }
 
 impl TryFrom<&serde_cbor_2::Value> for COSEKey {
@@ -712,6 +735,20 @@ fn ml_dsa_verify_signature(
 /// Compute the sha256 of a slice of data.
 pub fn compute_sha256(data: &[u8]) -> [u8; 32] {
     let mut hasher = sha::Sha256::new();
+    hasher.update(data);
+    hasher.finish()
+}
+
+/// Compute the sha384 of a slice of data.
+pub fn compute_sha384(data: &[u8]) -> [u8; 48] {
+    let mut hasher = sha::Sha384::new();
+    hasher.update(data);
+    hasher.finish()
+}
+
+/// Compute the sha512 of a slice of data.
+pub fn compute_sha512(data: &[u8]) -> [u8; 64] {
+    let mut hasher = sha::Sha512::new();
     hasher.update(data);
     hasher.finish()
 }
