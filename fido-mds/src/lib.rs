@@ -1442,6 +1442,18 @@ impl FromStr for FidoMds {
 }
 
 impl FidoMds {
+    /// Parse an MDS JWS blob against a caller-supplied set of X509 trust
+    /// roots. [`FromStr::from_str`] is the production path pinning GlobalSign
+    /// Root CA R3; this entry point exists for dev/test deployments (e.g.
+    /// `https://mds3.fido.tools/`) signed by a different CA. See
+    /// [`crate::mds::FidoMds::from_str_with_trust_roots`].
+    pub fn from_str_with_trust_roots(
+        s: &str,
+        trust_roots: &[openssl::x509::X509],
+    ) -> Result<Self, JwtError> {
+        RawFidoMds::from_str_with_trust_roots(s, trust_roots).map(|rawmds| rawmds.into())
+    }
+
     pub fn fido2_query(&self, query: &Query) -> Option<Vec<rc::Rc<FIDO2>>> {
         debug!(?query);
 
