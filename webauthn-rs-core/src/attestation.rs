@@ -442,6 +442,20 @@ pub(crate) fn verify_packed_attestation(
                 assert_cert_within_validity_window(cert)?;
             }
 
+            // WebAuthn §8.2: attStmt.x5c is "attestnCert ∥ caCert ..." — the
+            // chain stops at an intermediate, NOT the trust root. A
+            // self-signed certificate in x5c is evidence of a malformed
+            // attestation (FIDO Conformance Tool Resp-5 F-10 probes exactly
+            // this). The trust root MUST come from a separately-configured
+            // attestation-CA store, not from the attester itself. Reject any
+            // cert whose issuer == subject (i.e. self-signed).
+            for cert in &arr_x509 {
+                if cert.issued(cert) == x509::X509VerifyResult::OK {
+                    trace!("packed x5c contains self-signed cert (WebAuthn §8.2 violation)");
+                    return Err(WebauthnError::AttestationStatementX5CInvalid);
+                }
+            }
+
             // If attestnCert contains an extension with OID 1.3.6.1.4.1.45724.1.1.4
             // (id-fido-gen-ce-aaguid) verify that the value of this extension matches the aaguid
             // in authenticatorData.
