@@ -8,6 +8,7 @@ use crate::crypto::{
 use crate::error::WebauthnError;
 use crate::internals::*;
 use crate::proto::*;
+use openssl::asn1::Asn1Time;
 use openssl::hash::MessageDigest;
 use openssl::stack;
 use openssl::x509;
@@ -428,6 +429,19 @@ pub(crate) fn verify_packed_attestation(
 
             assert_packed_attest_req(attestn_cert)?;
 
+            // Every cert in the x5c chain must be currently valid
+            // (notBefore ≤ now ≤ notAfter). FIDO Conformance Tool v1.8.3
+            // Resp-5 F-6 (leaf expired), F-7 (leaf not-yet-started), F-12
+            // (expired intermediate) all construct fixtures where one cert
+            // is outside its validity window; the spec-compliant server
+            // must reject. The chain-walk `verify_attestation_ca_chain`
+            // covers this via OpenSSL's store, but only runs under tenant
+            // allowlist + `AttestationCaList`. This helper closes the gap
+            // for every packed attestation regardless of trust-anchor config.
+            for cert in &arr_x509 {
+                assert_cert_within_validity_window(cert)?;
+            }
+
             // If attestnCert contains an extension with OID 1.3.6.1.4.1.45724.1.1.4
             // (id-fido-gen-ce-aaguid) verify that the value of this extension matches the aaguid
             // in authenticatorData.
@@ -486,10 +500,41 @@ pub(crate) fn verify_packed_attestation(
     }
 }
 
+/// Verify that `cert` is currently within its validity window
+/// (notBefore <= now <= notAfter). Expired or not-yet-valid attestation
+/// certificates fail registration with
+/// `WebauthnError::AttestationCertificateRequirementsNotMet` — same variant
+/// as the other packed-cert checks in `assert_packed_attest_req`.
+pub(crate) fn assert_cert_within_validity_window(
+    cert: &x509::X509,
+) -> Result<(), WebauthnError> {
+    let now = Asn1Time::days_from_now(0).map_err(WebauthnError::OpenSSLError)?;
+    // `compare` returns Ordering; notBefore <= now iff the result is
+    // not-Greater, notAfter >= now iff the result is not-Less.
+    let not_before_ok = cert
+        .not_before()
+        .compare(&now)
+        .map(|ord| !matches!(ord, std::cmp::Ordering::Greater))
+        .map_err(WebauthnError::OpenSSLError)?;
+    if !not_before_ok {
+        trace!("attestation cert notBefore is in the future");
+        return Err(WebauthnError::AttestationCertificateRequirementsNotMet);
+    }
+    let not_after_ok = cert
+        .not_after()
+        .compare(&now)
+        .map(|ord| !matches!(ord, std::cmp::Ordering::Less))
+        .map_err(WebauthnError::OpenSSLError)?;
+    if !not_after_ok {
+        trace!("attestation cert notAfter is in the past (expired)");
+        return Err(WebauthnError::AttestationCertificateRequirementsNotMet);
+    }
+    Ok(())
+}
+
 /// Verify that attestnCert meets the requirements in
-/// [§ 8.2.1 Packed Attestation Statement Certificate Requirements][0]
-///
-/// [0]: https://www.w3.org/TR/webauthn-2/#sctn-packed-attestation-cert-requirements
+/// § 8.2.1 Packed Attestation Statement Certificate Requirements
+/// (webauthn-2 spec).
 pub fn assert_packed_attest_req(pubk: &x509::X509) -> Result<(), WebauthnError> {
     // https://w3c.github.io/webauthn/#sctn-packed-attestation-cert-requirements
     let der_bytes = pubk.to_der()?;
