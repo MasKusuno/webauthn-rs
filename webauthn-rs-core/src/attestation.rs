@@ -430,6 +430,19 @@ pub(crate) fn verify_packed_attestation(
 
             assert_packed_attest_req(attestn_cert)?;
 
+            // Every cert in the x5c chain must be currently valid
+            // (notBefore ≤ now ≤ notAfter). FIDO Conformance Tool v1.8.3
+            // Resp-5 F-6 (leaf expired), F-7 (leaf not-yet-started), F-12
+            // (expired intermediate) all construct fixtures where one cert
+            // is outside its validity window; the spec-compliant server
+            // must reject. The chain-walk `verify_attestation_ca_chain`
+            // covers this via OpenSSL's store, but only runs under tenant
+            // allowlist + `AttestationCaList`. This helper closes the gap
+            // for every packed attestation regardless of trust-anchor config.
+            for cert in &arr_x509 {
+                assert_cert_within_validity_window(cert)?;
+            }
+
             // If attestnCert contains an extension with OID 1.3.6.1.4.1.45724.1.1.4
             // (id-fido-gen-ce-aaguid) verify that the value of this extension matches the aaguid
             // in authenticatorData.
@@ -486,6 +499,29 @@ pub(crate) fn verify_packed_attestation(
             Ok((ParsedAttestationData::Self_, AttestationMetadata::None))
         }
     }
+}
+
+/// Verify that `cert` is currently within its validity window
+/// (notBefore <= now <= notAfter). Expired or not-yet-valid attestation
+/// certificates fail registration with
+/// `WebauthnError::AttestationCertificateRequirementsNotMet` — same variant
+/// as the other packed-cert checks in `assert_packed_attest_req`.
+pub(crate) fn assert_cert_within_validity_window(
+    cert: &x509::Certificate,
+) -> Result<(), WebauthnError> {
+    let now = SystemTime::now();
+    let validity = &cert.tbs_certificate.validity;
+    let not_before = validity.not_before.to_system_time();
+    let not_after = validity.not_after.to_system_time();
+    if now < not_before {
+        trace!("attestation cert notBefore is in the future");
+        return Err(WebauthnError::AttestationCertificateRequirementsNotMet);
+    }
+    if now > not_after {
+        trace!("attestation cert notAfter is in the past (expired)");
+        return Err(WebauthnError::AttestationCertificateRequirementsNotMet);
+    }
+    Ok(())
 }
 
 /// Verify that attestnCert meets the requirements in
