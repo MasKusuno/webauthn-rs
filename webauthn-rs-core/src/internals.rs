@@ -394,12 +394,22 @@ pub struct AuthenticatorData<T: Ceremony> {
 impl<T: Ceremony> TryFrom<&[u8]> for AuthenticatorData<T> {
     type Error = WebauthnError;
     fn try_from(auth_data_bytes: &[u8]) -> Result<Self, Self::Error> {
-        authenticator_data_parser(auth_data_bytes)
-            .map_err(|e| {
-                error!(?e, "try_from authenticator_data_parser");
-                WebauthnError::ParseNOMFailure
-            })
-            .map(|(_, ad)| ad)
+        let (remaining, ad) = authenticator_data_parser(auth_data_bytes).map_err(|e| {
+            error!(?e, "try_from authenticator_data_parser");
+            WebauthnError::ParseNOMFailure
+        })?;
+        // WebAuthn §6.1 authenticatorData is a self-describing byte array; any
+        // trailing bytes after the last declared extension mean the input is
+        // malformed. FIDO Conformance Tool v1.8.3 Resp-3 F-12 probes exactly
+        // this case — the RP must reject.
+        if !remaining.is_empty() {
+            error!(
+                leftover_len = remaining.len(),
+                "authenticatorData has trailing bytes after the last extension"
+            );
+            return Err(WebauthnError::ParseNOMFailure);
+        }
+        Ok(ad)
     }
 }
 
