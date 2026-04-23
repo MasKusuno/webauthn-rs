@@ -456,23 +456,6 @@ pub(crate) fn verify_packed_attestation(
                 }
             }
 
-            // WebAuthn §8.2 splits packed attestation into FULL (x5c present)
-            // and SELF (no x5c). FIDO Conformance Tool Resp-6 F-2 probes the
-            // boundary by sending an x5c whose leaf public key equals the
-            // credential public key — i.e. the authenticator is trying to
-            // pass off a SELF attestation as FULL. A spec-compliant server
-            // rejects because the "attestation" trust path is the credential
-            // itself, which provides no attestation value.
-            let credential_public_key = COSEKey::try_from(&acd.credential_pk)?;
-            let leaf_as_cose_key = COSEKey::try_from((alg, attestn_cert))?;
-            if credential_public_key == leaf_as_cose_key {
-                trace!(
-                    "packed x5c leaf public key equals credential public key \
-                     (SELF attestation masquerading as FULL — WebAuthn §8.2 violation)"
-                );
-                return Err(WebauthnError::AttestationStatementX5CInvalid);
-            }
-
             // If attestnCert contains an extension with OID 1.3.6.1.4.1.45724.1.1.4
             // (id-fido-gen-ce-aaguid) verify that the value of this extension matches the aaguid
             // in authenticatorData.
