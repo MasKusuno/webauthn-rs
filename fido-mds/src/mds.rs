@@ -1215,7 +1215,23 @@ impl FromStr for FidoMds {
         // Setup the trusted CA store so that we can validate the authenticity of the MDS blob.
         let root_ca = Certificate::from_pem(GLOBAL_SIGN_ROOT_CA_R3.as_bytes())
             .map_err(|_| JwtError::CryptoError)?;
+        Self::from_str_with_trust_roots(s, &[root_ca])
+    }
+}
 
+impl FidoMds {
+    /// Parse an MDS JWS blob, verifying its signature against a caller-supplied
+    /// set of trust-root X509 certificates. [`FromStr::from_str`] is the
+    /// production path (pins GlobalSign Root CA R3); this entry point exists
+    /// for dev/test deployments that need to talk to the FIDO Conformance
+    /// Tool's `mds3.fido.tools` test endpoint, which is signed by a different
+    /// CA. Callers are responsible for pinning their own trust chain; an
+    /// empty slice reduces to "trust no chain" and every well-formed JWS will
+    /// fail verification.
+    pub fn from_str_with_trust_roots(
+        s: &str,
+        trust_roots: &[Certificate],
+    ) -> Result<Self, JwtError> {
         let jws = JwsCompact::from_str(s)?;
 
         let (leaf, chain) = jws
@@ -1224,10 +1240,11 @@ impl FromStr for FidoMds {
 
         let now = SystemTime::now();
 
-        let verifier = JwsX509VerifierBuilder::new(&leaf, &chain)
-            .add_trust_root(root_ca)
-            .build(now)
-            .map_err(|_| JwtError::CryptoError)?;
+        let mut builder = JwsX509VerifierBuilder::new(&leaf, &chain);
+        for root in trust_roots {
+            builder = builder.add_trust_root(root.clone());
+        }
+        let verifier = builder.build(now).map_err(|_| JwtError::CryptoError)?;
 
         // Now we can release the embedded cert, since we have asserted the trust in the chain
         // that has signed this metadata.
@@ -1237,8 +1254,6 @@ impl FromStr for FidoMds {
             tracing::error!(?serde_err);
             JwtError::Serde
         })?;
-
-        // trace!(?metadata);
 
         Ok(metadata)
     }
