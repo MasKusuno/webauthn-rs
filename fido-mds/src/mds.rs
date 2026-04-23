@@ -4,8 +4,16 @@
 //! This allows parsing the fido metadata blob and consuming it's content. See `FidoMds`
 //! for more.
 
-use compact_jwt::{crypto::JwsX509VerifierBuilder, JwsCompact, JwsVerifier, JwtError};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
+use compact_jwt::{crypto::JwsX509VerifierBuilder, JwsCompact, JwtError};
+use openssl::bn;
+use openssl::ecdsa;
+use openssl::hash::MessageDigest;
+use openssl::sign;
+use openssl::stack;
 use openssl::x509;
+use openssl::x509::store;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -607,8 +615,16 @@ pub enum AttestationFormat {
 
 /// The output of authenticatorGetInfo. Some fields are hidden as they are duplicated
 /// in the metadata statement.
+//
+// NOTE: `deny_unknown_fields` was intentionally removed — the CTAP2.x spec
+// keeps growing (2026-Q1 added nine fields, 2026-Q2 added `defaultCredProtect`
+// + `maxAuthenticatorConfigLength`, and so on). Strict denial turns every new
+// field into an MDS-parse failure that blocks the whole civid boot fetch even
+// though civid consumes only a handful of fields. Unknown fields are now
+// silently dropped to the nearest `serde_json::Value`-capable bucket; the
+// fields civid actually uses are still strongly typed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 pub struct AuthenticatorGetInfo {
     /// The list of supported CTAP versions
     pub versions: Vec<AuthenticatorVersion>,
@@ -697,6 +713,12 @@ pub struct AuthenticatorGetInfo {
     /// MDS payloads.
     #[serde(default)]
     pub uv_count_since_last_pin_entry: Option<u32>,
+    /// Default credProtect policy the authenticator applies when a Relying
+    /// Party does not set the extension. Added by FIDO in 2026-Q2 MDS
+    /// payloads — surfaced by FIDO Conformance Tool v1.8.3 test blobs on
+    /// mds3.fido.tools.
+    #[serde(default)]
+    pub default_cred_protect: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -726,7 +748,12 @@ pub struct MetadataStatement {
     #[serde(default)]
     pub alternative_descriptions: BTreeMap<String, String>,
 
-    /// A list of friendly names describing the device.
+    /// A list of friendly names describing the device. Optional — the
+    /// FIDO Conformance Tool's mds3.fido.tools test blobs omit this field
+    /// on some fixtures; upstream `fido-mds` mandates it, but making it
+    /// default-empty keeps parse going without civid-side consequence
+    /// (the field is informational).
+    #[serde(default)]
     pub friendly_names: BTreeMap<String, String>,
 
     /// Earliest (i.e. lowest) trustworthy authenticatorVersion meeting the requirements specified
@@ -1230,24 +1257,103 @@ impl FidoMds {
         s: &str,
         trust_roots: &[x509::X509],
     ) -> Result<Self, JwtError> {
-        let jws = JwsCompact::from_str(s)?;
+        // Split compact JWS into its three parts so we can hold onto the raw
+        // signing-input bytes (header_b64 + "." + payload_b64) needed for
+        // ES256 verification.
+        let mut parts = s.trim().splitn(3, '.');
+        let hdr_b64 = parts.next().ok_or(JwtError::InvalidHeaderFormat)?;
+        let payload_b64 = parts.next().ok_or(JwtError::InvalidHeaderFormat)?;
+        let sig_b64 = parts.next().ok_or(JwtError::InvalidHeaderFormat)?;
+        if parts.next().is_some() {
+            return Err(JwtError::InvalidHeaderFormat);
+        }
 
+        // Parse via compact_jwt just to get the parsed header (x5c chain, alg).
+        let jws = JwsCompact::from_str(s)?;
         let fullchain = jws
             .get_x5c_chain()
             .and_then(|chain| chain.ok_or(JwtError::InvalidHeaderFormat))?;
+        let leaf = fullchain.first().cloned().ok_or(JwtError::InvalidHeaderFormat)?;
 
-        let mut builder = JwsX509VerifierBuilder::new().add_fullchain(fullchain);
+        // Verify the x5c chain against the caller-supplied trust roots using
+        // OpenSSL's X509 store. This replicates the chain-walk portion of
+        // compact_jwt's JwsX509VerifierBuilder::build (which we still exercise
+        // below for parity so its time/purpose checks also run).
+        let mut chain_stack = stack::Stack::new().map_err(|_| JwtError::OpenSSLError)?;
+        // `fullchain` is [leaf, intermediate_0, intermediate_1, ...]; OpenSSL
+        // wants intermediates only in the untrusted stack.
+        for cert in fullchain.iter().skip(1) {
+            chain_stack
+                .push(cert.clone())
+                .map_err(|_| JwtError::OpenSSLError)?;
+        }
+        let mut ca_store = store::X509StoreBuilder::new().map_err(|_| JwtError::OpenSSLError)?;
+        for root in trust_roots {
+            ca_store
+                .add_cert(root.clone())
+                .map_err(|_| JwtError::OpenSSLError)?;
+        }
+        let ca_store = ca_store.build();
+        let mut ca_ctx = x509::X509StoreContext::new().map_err(|_| JwtError::OpenSSLError)?;
+        let chain_ok = ca_ctx
+            .init(&ca_store, &leaf, &chain_stack, |ctx_ref| {
+                ctx_ref.verify_cert()
+            })
+            .map_err(|_| JwtError::OpenSSLError)?;
+        if !chain_ok {
+            tracing::error!("fido-mds x5c chain did not verify against supplied trust roots");
+            return Err(JwtError::OpenSSLError);
+        }
+
+        // We also run compact_jwt's builder purely as a belt-and-suspenders
+        // check (its build step re-verifies the chain). It is NOT the thing
+        // that validates the signature for us — compact_jwt 0.4.3's
+        // JwsX509Verifier::verify feeds raw r||s bytes into OpenSSL's generic
+        // Verifier, which fails for ES256 JWS (spec requires raw concat,
+        // OpenSSL expects DER). We do the DER wrap + verify ourselves below.
+        let mut builder = JwsX509VerifierBuilder::new().add_fullchain(fullchain.clone());
         for root in trust_roots {
             builder = builder.add_trust_root(root.clone());
         }
-        let verifier = builder.build().map_err(|_| JwtError::OpenSSLError)?;
+        let _ = builder.build().map_err(|_| JwtError::OpenSSLError)?;
 
-        // Now we can release the embedded cert, since we have asserted the trust in the chain
-        // that has signed this metadata.
-        let released = verifier.verify(&jws)?;
+        // Decode the raw JWS signature (r||s, 64 bytes for ES256) and wrap
+        // it into the DER ECDSA-Sig-Value that OpenSSL's Verifier expects.
+        let sig_bytes = URL_SAFE_NO_PAD
+            .decode(sig_b64.as_bytes())
+            .map_err(|_| JwtError::OpenSSLError)?;
+        if sig_bytes.len() != 64 {
+            tracing::error!(len = sig_bytes.len(), "ES256 JWS signature MUST be 64 bytes (r||s)");
+            return Err(JwtError::OpenSSLError);
+        }
+        let r = bn::BigNum::from_slice(&sig_bytes[..32]).map_err(|_| JwtError::OpenSSLError)?;
+        let s_num = bn::BigNum::from_slice(&sig_bytes[32..]).map_err(|_| JwtError::OpenSSLError)?;
+        let ec_sig = ecdsa::EcdsaSig::from_private_components(r, s_num)
+            .map_err(|_| JwtError::OpenSSLError)?;
+        let der_sig = ec_sig.to_der().map_err(|_| JwtError::OpenSSLError)?;
 
-        let metadata: FidoMds = released.from_json().map_err(|serde_err| {
-            tracing::error!(?serde_err);
+        // Verify signature over "hdr_b64.payload_b64" using the leaf public
+        // key under SHA-256.
+        let pkey = leaf.public_key().map_err(|_| JwtError::OpenSSLError)?;
+        let mut verifier = sign::Verifier::new(MessageDigest::sha256(), &pkey)
+            .map_err(|_| JwtError::OpenSSLError)?;
+        verifier
+            .update(hdr_b64.as_bytes())
+            .and_then(|_| verifier.update(b"."))
+            .and_then(|_| verifier.update(payload_b64.as_bytes()))
+            .map_err(|_| JwtError::OpenSSLError)?;
+        let valid = verifier.verify(&der_sig).map_err(|_| JwtError::OpenSSLError)?;
+        if !valid {
+            tracing::error!("fido-mds JWS signature did not verify with leaf public key");
+            return Err(JwtError::InvalidSignature);
+        }
+
+        // Signature verified; decode the payload and parse into FidoMds.
+        let payload_bytes = URL_SAFE_NO_PAD
+            .decode(payload_b64.as_bytes())
+            .map_err(|_| JwtError::OpenSSLError)?;
+        let metadata: FidoMds = serde_json::from_slice(&payload_bytes).map_err(|serde_err| {
+            tracing::error!(?serde_err, "fido-mds payload JSON did not match FidoMds schema");
             JwtError::Serde
         })?;
 
