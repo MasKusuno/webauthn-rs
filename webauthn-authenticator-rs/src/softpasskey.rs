@@ -23,6 +23,8 @@ use webauthn_rs_proto::{
 
 pub struct SoftPasskey {
     tokens: HashMap<Vec<u8>, Vec<u8>>,
+    /// rp_id_hash → credential_ids registered for that RP.
+    rp_credentials: HashMap<Vec<u8>, Vec<Vec<u8>>>,
     counter: u32,
     falsify_uv: bool,
 }
@@ -31,6 +33,7 @@ impl SoftPasskey {
     pub fn new(falsify_uv: bool) -> Self {
         SoftPasskey {
             tokens: HashMap::new(),
+            rp_credentials: HashMap::new(),
             counter: 0,
             falsify_uv,
         }
@@ -356,6 +359,10 @@ impl AuthenticatorBackendHashedClientData for SoftPasskey {
 
         // Okay, now persist the token. We shouldn't fail from here.
         self.tokens.insert(key_handle.clone(), ecpriv_der);
+        self.rp_credentials
+            .entry(rp_id_hash.clone())
+            .or_default()
+            .push(key_handle.clone());
 
         let rego = RegisterPublicKeyCredential {
             id: BASE64_ENGINE.encode(&key_handle),
@@ -461,15 +468,25 @@ impl U2FToken for SoftPasskey {
             return Err(WebauthnCError::NotSupported);
         }
 
-        let cred = allowed_credentials
-            .iter()
-            .filter_map(|ac| {
-                self.tokens
-                    .get(ac.id.as_ref())
-                    .map(|v| (ac.id.clone().into(), v.clone()))
-            })
-            .take(1)
-            .next();
+        let cred = if allowed_credentials.is_empty() {
+            // Discoverable credential: select by rp_id_hash.
+            self.rp_credentials
+                .get(&app_bytes)
+                .and_then(|ids| {
+                    ids.iter().find_map(|id| {
+                        self.tokens.get(id).map(|v| (id.clone(), v.clone()))
+                    })
+                })
+        } else {
+            allowed_credentials
+                .iter()
+                .filter_map(|ac| {
+                    self.tokens
+                        .get(ac.id.as_ref())
+                        .map(|v| (ac.id.clone().into(), v.clone()))
+                })
+                .next()
+        };
 
         let (key_handle, pkder) = if let Some((key_handle, pkder)) = cred {
             (key_handle, pkder)
