@@ -606,6 +606,14 @@ async fn main() {
                             println!("  RSA modulus: {}", hex::encode(&rsa.n));
                             println!("    Exponent: {}", hex::encode(rsa.e));
                         }
+                        COSEKeyType::ML_DSA(ml) => {
+                            println!("  ML-DSA parameter set: {:?}", ml.param_set);
+                            println!(
+                                "    Public key ({} bytes): {}",
+                                ml.public_key.as_ref().len(),
+                                hex::encode(ml.public_key.as_ref())
+                            );
+                        }
                     }
                 }
                 if let Some(policy) = &cred.cred_protect {
