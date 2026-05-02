@@ -19,6 +19,12 @@ default = []
 # Added for civid feature 027 (https://github.com/digital-go-jp/civid/issues/290).
 # Off by default because the underlying ml-dsa crate is v0.0.x + unaudited.
 ml-dsa = ["dep:ml-dsa"]
+# Enables acceptance of synthetic vendor IDs / fixtures the FIDO2 Server
+# conformance tool emits. Added for civid#378/#389 (ADR-004 Category 2).
+# Off by default — production consumers MUST NOT enable this. civid gates
+# it behind its conformance-fido-adapter feature chain, which is already
+# triple-gated (civid ADR-003).
+fido-conformance-testing = []
 
 [package.metadata.docs.rs]
 rustdoc-args = ["--cfg", "docsrs"]
