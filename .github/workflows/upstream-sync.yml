@@ -1,0 +1,158 @@
+name: upstream-sync
+
+# Rebase `ml-dsa-verify` onto `kanidm/webauthn-rs:master` once a week.
+#
+# Success path: open (or update) a PR proposing the rebased branch as an
+# update to `ml-dsa-verify`. A human reviews the diff — the automation
+# never force-pushes `ml-dsa-verify` itself.
+#
+# Failure path (rebase conflict): open (or refresh) a tracking issue
+# describing which upstream commits we diverged on.
+#
+# This fork carries three patch series on top of kanidm master
+# (`iconDark` / `from_str_with_trust_roots` / packed-x5c validity window
+# / ML-DSA verify). Keeping it cleanly rebased makes it easy to drop the
+# `[patch.crates-io]` block in `civid` once each series lands upstream.
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  rebase:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout ml-dsa-verify
+        uses: actions/checkout@v4
+        with:
+          ref: ml-dsa-verify
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/kanidm/webauthn-rs.git
+          git fetch upstream master --tags
+
+      - name: Attempt rebase
+        id: rebase
+        run: |
+          set -euo pipefail
+          BRANCH="automation/upstream-rebase"
+          git checkout -B "$BRANCH" ml-dsa-verify
+
+          UPSTREAM_SHA=$(git rev-parse upstream/master)
+          echo "upstream_sha=$UPSTREAM_SHA" >>"$GITHUB_OUTPUT"
+          echo "upstream_short=${UPSTREAM_SHA:0:8}" >>"$GITHUB_OUTPUT"
+
+          MERGE_BASE=$(git merge-base ml-dsa-verify upstream/master)
+          if [ "$MERGE_BASE" = "$UPSTREAM_SHA" ]; then
+            echo "ml-dsa-verify already contains upstream/master — nothing to do."
+            echo "status=up-to-date" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git rebase upstream/master; then
+            echo "status=rebased" >>"$GITHUB_OUTPUT"
+          else
+            CONFLICTS=$(git diff --name-only --diff-filter=U || true)
+            git rebase --abort || true
+            {
+              echo "status=conflict"
+              echo "conflicts<<EOF"
+              echo "$CONFLICTS"
+              echo "EOF"
+            } >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Push rebased branch
+        if: steps.rebase.outputs.status == 'rebased'
+        run: git push --force-with-lease origin "automation/upstream-rebase"
+
+      - name: Open or update PR
+        if: steps.rebase.outputs.status == 'rebased'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_SHORT: ${{ steps.rebase.outputs.upstream_short }}
+        run: |
+          set -euo pipefail
+          TITLE="chore: rebase ml-dsa-verify onto kanidm/master@${UPSTREAM_SHORT}"
+          BODY=$(cat <<EOF
+          Automated rebase of \`ml-dsa-verify\` onto \`kanidm/webauthn-rs:master\` at \`${UPSTREAM_SHORT}\`.
+
+          **Review checklist**
+          - [ ] Each patch in the stack still applies cleanly.
+          - [ ] \`cargo check --workspace\` passes (CI).
+          - [ ] Upstream didn't introduce a duplicate of any patch we carry — if so, drop that commit.
+          - [ ] Any patch whose upstream PR has merged can be removed from the stack.
+
+          Once merged, \`civid\` will pick this up via the weekly \`webauthn-rs-bump\` workflow.
+          EOF
+          )
+          EXISTING=$(gh pr list --head automation/upstream-rebase --state open --json number --jq '.[0].number')
+          if [ -n "$EXISTING" ]; then
+            gh pr edit "$EXISTING" --title "$TITLE" --body "$BODY"
+          else
+            gh pr create \
+              --base ml-dsa-verify \
+              --head automation/upstream-rebase \
+              --title "$TITLE" \
+              --body "$BODY"
+          fi
+
+      - name: Open or refresh conflict issue
+        if: steps.rebase.outputs.status == 'conflict'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_SHORT: ${{ steps.rebase.outputs.upstream_short }}
+          CONFLICTS: ${{ steps.rebase.outputs.conflicts }}
+        run: |
+          set -euo pipefail
+          TITLE="upstream-sync: rebase conflict against kanidm/master"
+          BODY=$(cat <<EOF
+          The weekly \`upstream-sync\` job failed to rebase \`ml-dsa-verify\` onto \`kanidm/master@${UPSTREAM_SHORT}\`.
+
+          **Conflicting paths**
+          \`\`\`
+          ${CONFLICTS:-(unknown — check workflow logs)}
+          \`\`\`
+
+          **Resolution**
+          1. \`git fetch upstream master\`
+          2. \`git checkout ml-dsa-verify && git rebase upstream/master\`
+          3. Resolve conflicts, \`git push --force-with-lease\`.
+          4. Close this issue once \`ml-dsa-verify\` is back on top of upstream.
+
+          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+          )
+          EXISTING=$(gh issue list --label upstream-sync --state open --json number --jq '.[0].number')
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "Rebase still failing against upstream \`${UPSTREAM_SHORT}\` — see run ${{ github.run_id }}."
+          else
+            gh issue create \
+              --title "$TITLE" \
+              --body "$BODY" \
+              --label upstream-sync
+          fi
+
+      - name: Summary
+        run: |
+          echo "### upstream-sync outcome" >>"$GITHUB_STEP_SUMMARY"
+          echo "" >>"$GITHUB_STEP_SUMMARY"
+          echo "Status: \`${{ steps.rebase.outputs.status }}\`" >>"$GITHUB_STEP_SUMMARY"
+          echo "Upstream tip: \`${{ steps.rebase.outputs.upstream_short }}\`" >>"$GITHUB_STEP_SUMMARY"
