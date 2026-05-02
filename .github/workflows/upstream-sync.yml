@@ -1,18 +1,31 @@
 name: upstream-sync
 
-# Rebase `ml-dsa-verify` onto `kanidm/webauthn-rs:master` once a week.
+# Rebase `ml-dsa-verify` onto `kanidm/webauthn-rs:master` once a week,
+# then force-push the rebased stack directly back to `ml-dsa-verify`.
 #
-# Success path: open (or update) a PR proposing the rebased branch as an
-# update to `ml-dsa-verify`. A human reviews the diff — the automation
-# never force-pushes `ml-dsa-verify` itself.
+# Rationale for direct force-push (no intermediate review PR): an
+# earlier design routed rebases through `automation/upstream-rebase` →
+# PR → human merge, but the squash-merge button in the GitHub UI
+# collapses the 11-commit fork patch stack into one commit — which
+# destroys the review/drop-individual-patch affordance the whole
+# narrow-fork discipline depends on (ADR-004 in civid). Direct
+# force-push-with-lease preserves linear history.
 #
-# Failure path (rebase conflict): open (or refresh) a tracking issue
-# describing which upstream commits we diverged on.
+# Guard rails that replace PR review:
+#   1. `--force-with-lease` — refuses if the remote tip moved since we
+#      fetched, so racing pushes don't silently clobber in-flight work.
+#   2. Conflict → issue (not silent). Rebase failures open (or refresh)
+#      an `upstream-sync`-labelled tracking issue with the failing
+#      paths, and no push is attempted.
+#   3. civid's `webauthn-rs-bump.yml` opens an auto-merge PR on
+#      `Cargo.lock` once this job lands new commits; branch protection
+#      on civid's `main` (fmt + clippy + test + xtask) is the real CI
+#      gate. If the rebased `ml-dsa-verify` breaks civid's build, the
+#      bump PR parks open for human triage.
 #
-# This fork carries three patch series on top of kanidm master
-# (`iconDark` / `from_str_with_trust_roots` / packed-x5c validity window
-# / ML-DSA verify). Keeping it cleanly rebased makes it easy to drop the
-# `[patch.crates-io]` block in `civid` once each series lands upstream.
+# This fork carries spec-compliance + ML-DSA patches on top of kanidm
+# master. Keeping it cleanly rebased lets civid drop the
+# `[patch.crates-io]` block once each series lands upstream.
 
 on:
   schedule:
@@ -21,7 +34,6 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
   issues: write
 
 concurrency:
@@ -48,12 +60,15 @@ jobs:
           git remote add upstream https://github.com/kanidm/webauthn-rs.git
           git fetch upstream master --tags
 
+      - name: Capture pre-push tip (for force-with-lease)
+        id: lease
+        run: |
+          echo "expected=$(git rev-parse ml-dsa-verify)" >>"$GITHUB_OUTPUT"
+
       - name: Attempt rebase
         id: rebase
         run: |
           set -euo pipefail
-          BRANCH="automation/upstream-rebase"
-          git checkout -B "$BRANCH" ml-dsa-verify
 
           UPSTREAM_SHA=$(git rev-parse upstream/master)
           echo "upstream_sha=$UPSTREAM_SHA" >>"$GITHUB_OUTPUT"
@@ -66,8 +81,11 @@ jobs:
             exit 0
           fi
 
+          git checkout ml-dsa-verify
           if git rebase upstream/master; then
             echo "status=rebased" >>"$GITHUB_OUTPUT"
+            echo "new_tip=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+            echo "new_tip_short=$(git rev-parse --short=8 HEAD)" >>"$GITHUB_OUTPUT"
           else
             CONFLICTS=$(git diff --name-only --diff-filter=U || true)
             git rebase --abort || true
@@ -79,40 +97,10 @@ jobs:
             } >>"$GITHUB_OUTPUT"
           fi
 
-      - name: Push rebased branch
+      - name: Force-push ml-dsa-verify
         if: steps.rebase.outputs.status == 'rebased'
-        run: git push --force-with-lease origin "automation/upstream-rebase"
-
-      - name: Open or update PR
-        if: steps.rebase.outputs.status == 'rebased'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          UPSTREAM_SHORT: ${{ steps.rebase.outputs.upstream_short }}
         run: |
-          set -euo pipefail
-          TITLE="chore: rebase ml-dsa-verify onto kanidm/master@${UPSTREAM_SHORT}"
-          BODY=$(cat <<EOF
-          Automated rebase of \`ml-dsa-verify\` onto \`kanidm/webauthn-rs:master\` at \`${UPSTREAM_SHORT}\`.
-
-          **Review checklist**
-          - [ ] Each patch in the stack still applies cleanly.
-          - [ ] \`cargo check --workspace\` passes (CI).
-          - [ ] Upstream didn't introduce a duplicate of any patch we carry — if so, drop that commit.
-          - [ ] Any patch whose upstream PR has merged can be removed from the stack.
-
-          Once merged, \`civid\` will pick this up via the weekly \`webauthn-rs-bump\` workflow.
-          EOF
-          )
-          EXISTING=$(gh pr list --head automation/upstream-rebase --state open --json number --jq '.[0].number')
-          if [ -n "$EXISTING" ]; then
-            gh pr edit "$EXISTING" --title "$TITLE" --body "$BODY"
-          else
-            gh pr create \
-              --base ml-dsa-verify \
-              --head automation/upstream-rebase \
-              --title "$TITLE" \
-              --body "$BODY"
-          fi
+          git push --force-with-lease="ml-dsa-verify:${{ steps.lease.outputs.expected }}" origin ml-dsa-verify
 
       - name: Open or refresh conflict issue
         if: steps.rebase.outputs.status == 'conflict'
@@ -152,7 +140,12 @@ jobs:
 
       - name: Summary
         run: |
-          echo "### upstream-sync outcome" >>"$GITHUB_STEP_SUMMARY"
-          echo "" >>"$GITHUB_STEP_SUMMARY"
-          echo "Status: \`${{ steps.rebase.outputs.status }}\`" >>"$GITHUB_STEP_SUMMARY"
-          echo "Upstream tip: \`${{ steps.rebase.outputs.upstream_short }}\`" >>"$GITHUB_STEP_SUMMARY"
+          {
+            echo "### upstream-sync outcome"
+            echo ""
+            echo "Status: \`${{ steps.rebase.outputs.status }}\`"
+            echo "Upstream tip: \`${{ steps.rebase.outputs.upstream_short }}\`"
+            if [ "${{ steps.rebase.outputs.status }}" = "rebased" ]; then
+              echo "New \`ml-dsa-verify\` tip: \`${{ steps.rebase.outputs.new_tip_short }}\`"
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"
