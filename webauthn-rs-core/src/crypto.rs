@@ -40,9 +40,24 @@ fn pkey_verify_signature(
         COSEAlgorithm::EDDSA => {
             sign::Verifier::new_without_digest(pkey).map_err(WebauthnError::OpenSSLError)
         }
+        // RSASSA-PKCS1-v1_5 with SHA-1 (COSE alg -65535). The verifier must
+        // retain the mathematical capability to check this signature shape
+        // — the TPM attestation path and a handful of Windows Hello
+        // firmwares still produce it. Algorithm acceptance (whether an RP
+        // enrols / authenticates against an RS1 credential) is a **policy**
+        // decision belonging to the consumer: the high-level `webauthn-rs`
+        // facade omits `INSECURE_RS1` from `COSEAlgorithm::secure_algs()`
+        // so production RPs building against the facade will never offer
+        // RS1 in `pubKeyCredParams`. A consumer with a different risk model
+        // (fido2 conformance harnesses, legacy WebAuthn L1 interop fixtures)
+        // can enrol RS1 explicitly.
         COSEAlgorithm::INSECURE_RS1 => {
-            error!("INSECURE SHA1 USAGE DETECTED");
-            Err(WebauthnError::CredentialInsecureCryptography)
+            let mut verifier = sign::Verifier::new(hash::MessageDigest::sha1(), pkey)
+                .map_err(WebauthnError::OpenSSLError)?;
+            verifier
+                .set_rsa_padding(rsa::Padding::PKCS1)
+                .map_err(WebauthnError::OpenSSLError)?;
+            Ok(verifier)
         }
         c_alg => {
             debug!(?c_alg, "WebauthnError::COSEKeyInvalidType");
@@ -217,10 +232,14 @@ impl EDDSACurve {
 /// * `ES256` / `RS256` / `PS256` → SHA-256
 /// * `ES384` / `RS384` / `PS384` → SHA-384
 /// * `ES512` / `RS512` / `PS512` → SHA-512
+/// * `INSECURE_RS1` → SHA-1
 ///
-/// `INSECURE_RS1` is explicitly rejected — civid and upstream webauthn-rs
-/// both refuse to hash over SHA-1. `EDDSA` and `PinUvProtocol` do not
-/// appear in TPM signing algorithms and return `COSEKeyInvalidType`.
+/// SHA-1 is recognised here as a **verifier capability**, not a
+/// recommendation: the function answers the question "what digest does
+/// alg-N imply" and an RP's policy layer (`secure_algs()`, tenant
+/// allowlists, AAL profile) decides whether a credential signed with
+/// alg-N may be enrolled. `EDDSA` and `PinUvProtocol` do not appear in
+/// TPM signing algorithms and return `COSEKeyInvalidType`.
 pub(crate) fn only_hash_from_type(
     alg: COSEAlgorithm,
     input: &[u8],
@@ -235,10 +254,7 @@ pub(crate) fn only_hash_from_type(
         COSEAlgorithm::ES512 | COSEAlgorithm::RS512 | COSEAlgorithm::PS512 => {
             hash::MessageDigest::sha512()
         }
-        COSEAlgorithm::INSECURE_RS1 => {
-            warn!("INSECURE SHA1 USAGE DETECTED");
-            return Err(WebauthnError::CredentialInsecureCryptography);
-        }
+        COSEAlgorithm::INSECURE_RS1 => hash::MessageDigest::sha1(),
         c_alg => {
             debug!(?c_alg, "WebauthnError::COSEKeyInvalidType");
             return Err(WebauthnError::COSEKeyInvalidType);
@@ -349,14 +365,24 @@ impl TryFrom<&serde_cbor_2::Value> for COSEKey {
             cose_key.validate()?;
             // return it
             Ok(cose_key)
-        } else if key_type == (COSEKeyTypeId::EC_RSA as i128) && (type_ == COSEAlgorithm::RS256) {
+        } else if key_type == (COSEKeyTypeId::EC_RSA as i128)
+            && (type_ == COSEAlgorithm::RS256 || type_ == COSEAlgorithm::INSECURE_RS1)
+        {
             // RSAKey
-
+            //
+            // Valid modulus lengths expressed in bytes: 128 (RSA-1024),
+            // 256 (RSA-2048), 384 (RSA-3072), 512 (RSA-4096). The RSA-2048
+            // fixture is what production WebAuthn deployments ship; the
+            // shorter variants are retained so the verifier can inspect
+            // legacy-shape attestations (WebAuthn L1 interop harnesses,
+            // TPM INSECURE_RS1 fixtures from the FIDO Conformance Tool).
+            // Policy on whether such a credential is accepted lives in
+            // the consumer — `secure_algs()` omits RS1, and AAL profiles
+            // further restrict modulus size independently of this parser.
+            //
             // -37 -> PS256
             // -257 -> RS256 aka RSASSA-PKCS1-v1_5 with SHA-256
-
-            // -1 -> n 256 bytes
-            // -2 -> e 3 bytes
+            // -65535 -> INSECURE_RS1 aka RSASSA-PKCS1-v1_5 with SHA-1
 
             let n_value = m
                 .get(&serde_cbor_2::Value::Integer(-1))
@@ -368,7 +394,7 @@ impl TryFrom<&serde_cbor_2::Value> for COSEKey {
                 .ok_or(WebauthnError::COSEKeyInvalidCBORValue)?;
             let e = cbor_try_bytes!(e_value)?;
 
-            if n.len() != 256 || e.len() != 3 {
+            if !matches!(n.len(), 128 | 256 | 384 | 512) || e.len() != 3 {
                 return Err(WebauthnError::COSEKeyRSANEInvalid);
             }
 
@@ -662,9 +688,9 @@ fn ml_dsa_verify_signature(
     signature: &[u8],
     verification_data: &[u8],
 ) -> Result<bool, WebauthnError> {
-    use ml_dsa::{MlDsa44, MlDsa65, MlDsa87, Signature, VerifyingKey};
-    use ml_dsa::{EncodedSignature, EncodedVerifyingKey};
     use ml_dsa::signature::Verifier;
+    use ml_dsa::{EncodedSignature, EncodedVerifyingKey};
+    use ml_dsa::{MlDsa44, MlDsa65, MlDsa87, Signature, VerifyingKey};
 
     // Length gate — matches the CBOR-decode-side check but also protects the
     // path where a COSEKey is constructed by a non-CBOR caller.
@@ -692,8 +718,8 @@ fn ml_dsa_verify_signature(
             let sig_enc = EncodedSignature::<MlDsa44>::try_from(signature)
                 .map_err(|_| WebauthnError::COSEKeyInvalidType)?;
             let vk = VerifyingKey::<MlDsa44>::decode(&pk_enc);
-            let sig = Signature::<MlDsa44>::decode(&sig_enc)
-                .ok_or(WebauthnError::COSEKeyInvalidType)?;
+            let sig =
+                Signature::<MlDsa44>::decode(&sig_enc).ok_or(WebauthnError::COSEKeyInvalidType)?;
             vk.verify(verification_data, &sig).is_ok()
         }
         MlDsaParamSet::MlDsa65 => {
@@ -702,8 +728,8 @@ fn ml_dsa_verify_signature(
             let sig_enc = EncodedSignature::<MlDsa65>::try_from(signature)
                 .map_err(|_| WebauthnError::COSEKeyInvalidType)?;
             let vk = VerifyingKey::<MlDsa65>::decode(&pk_enc);
-            let sig = Signature::<MlDsa65>::decode(&sig_enc)
-                .ok_or(WebauthnError::COSEKeyInvalidType)?;
+            let sig =
+                Signature::<MlDsa65>::decode(&sig_enc).ok_or(WebauthnError::COSEKeyInvalidType)?;
             vk.verify(verification_data, &sig).is_ok()
         }
         MlDsaParamSet::MlDsa87 => {
@@ -712,8 +738,8 @@ fn ml_dsa_verify_signature(
             let sig_enc = EncodedSignature::<MlDsa87>::try_from(signature)
                 .map_err(|_| WebauthnError::COSEKeyInvalidType)?;
             let vk = VerifyingKey::<MlDsa87>::decode(&pk_enc);
-            let sig = Signature::<MlDsa87>::decode(&sig_enc)
-                .ok_or(WebauthnError::COSEKeyInvalidType)?;
+            let sig =
+                Signature::<MlDsa87>::decode(&sig_enc).ok_or(WebauthnError::COSEKeyInvalidType)?;
             vk.verify(verification_data, &sig).is_ok()
         }
     };
@@ -922,5 +948,89 @@ mod tests {
             }
             _ => panic!("Key should be parsed OKP key"),
         }
+    }
+
+    /// Verifier-layer capability: `pkey_verify_signature(INSECURE_RS1, ..)`
+    /// must return `Ok(true)` when handed a mathematically-valid RSASSA-
+    /// PKCS1-v1_5 + SHA-1 signature, and `Ok(false)` on tampering — the
+    /// same contract every other supported algorithm honours. Any policy
+    /// that prevents RS1 credentials from being enrolled belongs to the
+    /// consumer (`secure_algs()`, tenant allowlists); the verifier itself
+    /// must not take that decision.
+    #[test]
+    fn pkey_verify_signature_rs1_round_trip() {
+        let rsa = rsa::Rsa::generate(2048).expect("gen RSA-2048");
+        let signing_key = pkey::PKey::from_rsa(rsa).expect("PKey from RSA");
+        let verifying_key =
+            pkey::PKey::public_key_from_der(&signing_key.public_key_to_der().expect("pubkey DER"))
+                .expect("verifying PKey");
+
+        let message = b"civid verifier-capability test vector - RS1";
+        let mut signer =
+            sign::Signer::new(hash::MessageDigest::sha1(), &signing_key).expect("sha1 signer");
+        signer
+            .set_rsa_padding(rsa::Padding::PKCS1)
+            .expect("PKCS1 padding");
+        signer.update(message).expect("signer update");
+        let signature = signer.sign_to_vec().expect("sign");
+
+        let ok = pkey_verify_signature(
+            &verifying_key,
+            COSEAlgorithm::INSECURE_RS1,
+            &signature,
+            message,
+        )
+        .expect("verify");
+        assert!(ok, "legitimate RS1 signature must verify");
+
+        // Flip one bit and confirm the verifier refuses.
+        let mut tampered = signature.clone();
+        tampered[0] ^= 0x01;
+        let bad = pkey_verify_signature(
+            &verifying_key,
+            COSEAlgorithm::INSECURE_RS1,
+            &tampered,
+            message,
+        )
+        .expect("verify tampered");
+        assert!(!bad, "tampered RS1 signature must fail verification");
+    }
+
+    /// `only_hash_from_type` must return the SHA-1 digest length for RS1
+    /// so the TPM `extraData == hash(attToBeSigned)` equality check can
+    /// run without the verifier short-circuiting on algorithm identity.
+    #[test]
+    fn only_hash_from_type_rs1_emits_sha1_digest() {
+        let out = only_hash_from_type(COSEAlgorithm::INSECURE_RS1, b"abc").expect("sha1 hash");
+        assert_eq!(
+            out,
+            hex!("a9993e364706816aba3e25717850c26c9cd0d89d"),
+            "FIPS 180-4 §A.1 test vector",
+        );
+    }
+
+    /// RS1 RSA public keys must parse through `COSEKey::try_from`. The
+    /// earlier `(type_ == RS256)` gate silently dropped RS1 credentials
+    /// with `COSEKeyInvalidType`; extending the gate to include RS1 lets
+    /// the verifier inspect the key while any enrolment decision is
+    /// taken upstream.
+    #[test]
+    fn cose_rs1_rsa_key_parses() {
+        // Synthesise a minimal COSE RSA map: kty=3 (RSA), alg=-65535
+        // (INSECURE_RS1), -1 → n (2048-bit modulus placeholder), -2 → e
+        // (3 bytes). Values do not need to form a real key for parsing;
+        // they just need correct shape.
+        let mut map = std::collections::BTreeMap::new();
+        map.insert(Value::Integer(1), Value::Integer(3));
+        map.insert(Value::Integer(3), Value::Integer(-65535));
+        // 256-byte modulus (RSA-2048). Use a high bit to look valid-ish.
+        let mut n = vec![0x80u8];
+        n.extend(std::iter::repeat(0x01).take(255));
+        map.insert(Value::Integer(-1), Value::Bytes(n));
+        map.insert(Value::Integer(-2), Value::Bytes(vec![0x01, 0x00, 0x01]));
+        let cbor_val = Value::Map(map);
+        let key = COSEKey::try_from(&cbor_val).expect("parse RS1 RSA key");
+        assert_eq!(key.type_, COSEAlgorithm::INSECURE_RS1);
+        assert!(matches!(key.key, COSEKeyType::RSA(_)));
     }
 }

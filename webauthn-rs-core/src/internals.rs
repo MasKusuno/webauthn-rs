@@ -1517,8 +1517,7 @@ mod tests {
     #[test]
     fn tpm_vendor_fido_synthetic_accepted_with_feature() {
         use super::TpmVendor;
-        let parsed =
-            TpmVendor::try_from(b"FFFFF1D0").expect("FFFFF1D0 must parse with feature on");
+        let parsed = TpmVendor::try_from(b"FFFFF1D0").expect("FFFFF1D0 must parse with feature on");
         assert!(matches!(parsed, TpmVendor::FidoConformanceTestHarness));
     }
 }

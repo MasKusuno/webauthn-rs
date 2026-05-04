@@ -520,9 +520,7 @@ pub(crate) fn verify_packed_attestation(
 /// certificates fail registration with
 /// `WebauthnError::AttestationCertificateRequirementsNotMet` — same variant
 /// as the other packed-cert checks in `assert_packed_attest_req`.
-pub(crate) fn assert_cert_within_validity_window(
-    cert: &x509::X509,
-) -> Result<(), WebauthnError> {
+pub(crate) fn assert_cert_within_validity_window(cert: &x509::X509) -> Result<(), WebauthnError> {
     let now = Asn1Time::days_from_now(0).map_err(WebauthnError::OpenSSLError)?;
     // `compare` returns Ordering; notBefore <= now iff the result is
     // not-Greater, notAfter >= now iff the result is not-Less.
