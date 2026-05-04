@@ -18,5 +18,11 @@ webauthn_rs/index.html
 webauthn_rs/interface/index.html
 
 webauthn_rs_core/index.html
-webauthn_rs_demo/index.html
+# webauthn_rs_demo intentionally omitted: its tide -> async-h1 -> async-io 1.x
+# chain pins rustix 0.37.28, which newer nightly rustc rejects ("attributes
+# starting with `rustc` are reserved"). The nightly docs matrix now excludes
+# webauthn-rs-demo, so listing it here would break the nightly manifest check.
+# Stable still documents it (it's a compat tester, not a library surface), and
+# any real breakage there surfaces in the `generate docs` step before this
+# manifest is even consulted.
 webauthn_rs_proto/index.html

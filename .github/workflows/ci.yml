@@ -247,10 +247,21 @@ jobs:
       # This tests that all the stubs work properly for optional dependencies,
       # but doesn't work for fido-key-manager which includes NFC and USB support
       # by default.
+      #
+      # The extra --exclude tide_tutorial / webauthn-rs-demo on nightly sidesteps
+      # a pre-existing break: their tide -> async-h1 -> async-io 1.x chain pins
+      # rustix 0.37.28, which uses `#[cfg_attr(rustc_attrs, rustc_layout_...)]`
+      # attributes that newer nightly rustc now rejects ("attributes starting
+      # with `rustc` are reserved"). rustix 0.37 is EOL and async-io 1.x locks
+      # us to the 0.37 line, so excluding these two example crates from the
+      # nightly-only docs build is the minimum-blast-radius fix. Stable still
+      # documents them; see .github/doc_manifest for the matching note on why
+      # webauthn_rs_demo is no longer asserted-present (would break nightly).
       - name: generate docs
         run: |
           cargo ${{ matrix.rust_version == 'nightly' && '+nightly' || '' }} doc --all \
             --exclude fido-key-manager \
+            ${{ matrix.rust_version == 'nightly' && '--exclude tide_tutorial --exclude webauthn-rs-demo' || '' }} \
             --no-deps \
             --document-private-items
         env:
@@ -265,12 +276,14 @@ jobs:
           retention-days: 14
       - run: ./.github/check_built_docs.sh
 
-      # Build with all features
+      # Build with all features. Same nightly-only tide/demo exclude as above
+      # (see comment on the first `generate docs` step).
       - run: |
           sudo apt-get -y install libpcsclite-dev libusb-1.0-0-dev libdbus-1-dev
       - run: |
           cargo ${{ matrix.rust_version == 'nightly' && '+nightly' || '' }} doc \
           --all \
+          ${{ matrix.rust_version == 'nightly' && '--exclude tide_tutorial --exclude webauthn-rs-demo' || '' }} \
           --no-deps \
           --document-private-items \
           --all-features
