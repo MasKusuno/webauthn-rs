@@ -3694,7 +3694,7 @@ mod tests {
         // attestation is valid end-to-end: the returned credential is
         // ES256, the RS1 is purely on the attestation-statement signature.
         assert!(
-            matches!(result, Ok(_)),
+            result.is_ok(),
             "expected Ok(CredentialV5), got {:?}",
             result,
         );

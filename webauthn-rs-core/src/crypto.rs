@@ -1029,7 +1029,7 @@ mod tests {
         map.insert(Value::Integer(3), Value::Integer(-65535));
         // 256-byte modulus (RSA-2048). Use a high bit to look valid-ish.
         let mut n = vec![0x80u8];
-        n.extend(std::iter::repeat(0x01).take(255));
+        n.extend(std::iter::repeat_n(0x01, 255));
         map.insert(Value::Integer(-1), Value::Bytes(n));
         map.insert(Value::Integer(-2), Value::Bytes(vec![0x01, 0x00, 0x01]));
         let cbor_val = Value::Map(map);

@@ -103,8 +103,6 @@ extern crate num_derive;
 #[macro_use]
 extern crate tracing;
 
-use std::str::FromStr;
-
 use crate::error::WebauthnCError;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64_ENGINE;
 use url::Url;
