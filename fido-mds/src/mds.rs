@@ -17,6 +17,7 @@ use openssl::sign;
 use openssl::stack;
 use openssl::x509;
 use openssl::x509::store;
+use openssl::x509::{CrlStatus, X509Crl};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -1260,6 +1261,33 @@ impl FidoMds {
         s: &str,
         trust_roots: &[x509::X509],
     ) -> Result<Self, JwtError> {
+        Self::from_str_with_trust_roots_and_crls(s, trust_roots, &[])
+    }
+
+    /// Parse an MDS JWS blob, verifying its signature against a caller-
+    /// supplied set of trust-root X509 certificates **and** refusing any
+    /// blob whose x5c chain contains a certificate listed in one of the
+    /// supplied CRLs. Callers responsible for fetching the CRLs out of
+    /// band (typically from each cert's `crlDistributionPoints`
+    /// extension) and passing them in; pass an empty `crls` slice to
+    /// skip CRL consultation (behaves identically to
+    /// [`Self::from_str_with_trust_roots`]).
+    ///
+    /// civid#430 Phase B / MDS3 F-5: the FIDO Conformance Tool publishes
+    /// a test MDS endpoint whose x5c chain walks OK but whose leaf CA
+    /// is CRL-revoked. The tool expects an MDS3-aware server to refuse.
+    /// OpenSSL's built-in CRL flag (`X509_V_FLAG_CRL_CHECK`) requires
+    /// the CRL to be attached to the X509_STORE via
+    /// `X509_STORE_add_crl`, which openssl-sys 0.9 does not expose in
+    /// its handwritten bindings. We iterate each cert in the chain
+    /// against each supplied CRL via `X509Crl::get_by_cert` instead —
+    /// same semantics (check every cert in the chain, not just the
+    /// leaf), without needing a new FFI surface.
+    pub fn from_str_with_trust_roots_and_crls(
+        s: &str,
+        trust_roots: &[x509::X509],
+        crls: &[X509Crl],
+    ) -> Result<Self, JwtError> {
         // Split compact JWS into its three parts. We keep the b64-encoded
         // header + payload in hand for the ES256 manual verification branch
         // below; the RS256 branch reuses `jws` directly.
@@ -1307,6 +1335,29 @@ impl FidoMds {
         if !chain_ok {
             tracing::error!("fido-mds x5c chain did not verify against supplied trust roots");
             return Err(JwtError::OpenSSLError);
+        }
+
+        // civid#430 Phase B — consult caller-supplied CRLs. Any cert in
+        // the chain marked Revoked by any CRL fails verification. This
+        // is a complementary check on top of the trust-root walk: the
+        // walk proves the chain reaches a trusted anchor, the CRL step
+        // proves no intermediate or leaf cert has been revoked since
+        // issuance.
+        if !crls.is_empty() {
+            for cert in fullchain.iter() {
+                for crl in crls {
+                    match crl.get_by_cert(cert) {
+                        CrlStatus::NotRevoked => {}
+                        CrlStatus::Revoked(_) | CrlStatus::RemoveFromCrl(_) => {
+                            tracing::error!(
+                                serial = ?cert.serial_number().to_bn().ok(),
+                                "fido-mds x5c chain cert is listed in a caller-supplied CRL"
+                            );
+                            return Err(JwtError::X5cChainNotTrusted);
+                        }
+                    }
+                }
+            }
         }
 
         // Dispatch signature verification on the JWS header `alg`. FIDO
