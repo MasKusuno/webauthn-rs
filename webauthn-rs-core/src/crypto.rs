@@ -422,11 +422,15 @@ impl TryFrom<&serde_cbor_2::Value> for COSEKey {
         {
             // draft-ietf-cose-dilithium §5 — AKP key type for ML-DSA. Single
             // public-key member at label -1 carrying raw FIPS 204 encoded bytes.
+            // The outer `if` guard already narrowed `type_` to one of the
+            // three ML-DSA variants; surface the default arm as an error
+            // instead of `unreachable!()` so `#![deny(clippy::unreachable)]`
+            // is happy without weakening the invariant.
             let param_set = match type_ {
                 COSEAlgorithm::ML_DSA_44 => MlDsaParamSet::MlDsa44,
                 COSEAlgorithm::ML_DSA_65 => MlDsaParamSet::MlDsa65,
                 COSEAlgorithm::ML_DSA_87 => MlDsaParamSet::MlDsa87,
-                _ => unreachable!(),
+                _ => return Err(WebauthnError::COSEKeyInvalidType),
             };
 
             let pk_value = m

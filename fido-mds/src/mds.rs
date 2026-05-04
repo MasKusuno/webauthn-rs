@@ -1273,7 +1273,10 @@ impl FidoMds {
         let fullchain = jws
             .get_x5c_chain()
             .and_then(|chain| chain.ok_or(JwtError::InvalidHeaderFormat))?;
-        let leaf = fullchain.first().cloned().ok_or(JwtError::InvalidHeaderFormat)?;
+        let leaf = fullchain
+            .first()
+            .cloned()
+            .ok_or(JwtError::InvalidHeaderFormat)?;
 
         // Verify the x5c chain against the caller-supplied trust roots using
         // OpenSSL's X509 store. This replicates the chain-walk portion of
@@ -1323,7 +1326,10 @@ impl FidoMds {
             .decode(sig_b64.as_bytes())
             .map_err(|_| JwtError::OpenSSLError)?;
         if sig_bytes.len() != 64 {
-            tracing::error!(len = sig_bytes.len(), "ES256 JWS signature MUST be 64 bytes (r||s)");
+            tracing::error!(
+                len = sig_bytes.len(),
+                "ES256 JWS signature MUST be 64 bytes (r||s)"
+            );
             return Err(JwtError::OpenSSLError);
         }
         let r = bn::BigNum::from_slice(&sig_bytes[..32]).map_err(|_| JwtError::OpenSSLError)?;
@@ -1342,7 +1348,9 @@ impl FidoMds {
             .and_then(|_| verifier.update(b"."))
             .and_then(|_| verifier.update(payload_b64.as_bytes()))
             .map_err(|_| JwtError::OpenSSLError)?;
-        let valid = verifier.verify(&der_sig).map_err(|_| JwtError::OpenSSLError)?;
+        let valid = verifier
+            .verify(&der_sig)
+            .map_err(|_| JwtError::OpenSSLError)?;
         if !valid {
             tracing::error!("fido-mds JWS signature did not verify with leaf public key");
             return Err(JwtError::InvalidSignature);
@@ -1353,7 +1361,10 @@ impl FidoMds {
             .decode(payload_b64.as_bytes())
             .map_err(|_| JwtError::OpenSSLError)?;
         let metadata: FidoMds = serde_json::from_slice(&payload_bytes).map_err(|serde_err| {
-            tracing::error!(?serde_err, "fido-mds payload JSON did not match FidoMds schema");
+            tracing::error!(
+                ?serde_err,
+                "fido-mds payload JSON did not match FidoMds schema"
+            );
             JwtError::Serde
         })?;
 
