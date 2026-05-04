@@ -1458,6 +1458,21 @@ impl FidoMds {
         RawFidoMds::from_str_with_trust_roots(s, trust_roots).map(|rawmds| rawmds.into())
     }
 
+    /// civid#430 Phase B — parse + verify an MDS JWS blob against
+    /// caller-supplied trust roots AND caller-supplied CRLs. Any cert
+    /// in the x5c chain listed in any CRL fails verification with
+    /// `JwtError::X5cChainNotTrusted`. Empty `crls` → behaves
+    /// identically to [`Self::from_str_with_trust_roots`]. See
+    /// [`crate::mds::FidoMds::from_str_with_trust_roots_and_crls`].
+    pub fn from_str_with_trust_roots_and_crls(
+        s: &str,
+        trust_roots: &[openssl::x509::X509],
+        crls: &[openssl::x509::X509Crl],
+    ) -> Result<Self, JwtError> {
+        RawFidoMds::from_str_with_trust_roots_and_crls(s, trust_roots, crls)
+            .map(|rawmds| rawmds.into())
+    }
+
     pub fn fido2_query(&self, query: &Query) -> Option<Vec<rc::Rc<FIDO2>>> {
         debug!(?query);
 
