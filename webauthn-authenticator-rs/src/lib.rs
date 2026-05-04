@@ -107,11 +107,54 @@ use crate::error::WebauthnCError;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64_ENGINE;
 use url::Url;
 
-use webauthn_rs_core::WebauthnCore;
 use webauthn_rs_proto::{
     CreationChallengeResponse, PublicKeyCredential, PublicKeyCredentialCreationOptions,
     PublicKeyCredentialRequestOptions, RegisterPublicKeyCredential, RequestChallengeResponse,
 };
+
+// Local copy of `webauthn_rs_core::WebauthnCore::origins_match`, inlined so the
+// origin check can run without pulling the crypto-gated `webauthn-rs-core` dep
+// into default / `win10` builds of this crate. Pure URL logic, no crypto.
+fn origins_match(
+    allow_subdomains_origin: bool,
+    allow_any_port: bool,
+    request_origin: &Url,
+    allowed_origin: &Url,
+) -> bool {
+    if allowed_origin == request_origin {
+        return true;
+    }
+    if allowed_origin.scheme() != request_origin.scheme() {
+        return false;
+    }
+    match (allowed_origin.origin(), request_origin.origin()) {
+        (
+            url::Origin::Tuple(rp_id_scheme, rp_id_host, rp_id_port),
+            url::Origin::Tuple(request_scheme, request_host, request_port),
+        ) => {
+            if rp_id_scheme != request_scheme {
+                return false;
+            }
+            if !allow_any_port && rp_id_port != request_port {
+                return false;
+            }
+            match (rp_id_host, request_host) {
+                (url::Host::Domain(rp_id_domain), url::Host::Domain(request_domain)) => {
+                    if rp_id_domain == request_domain {
+                        return true;
+                    }
+                    allow_subdomains_origin
+                        && request_domain
+                            .strip_suffix(&rp_id_domain)
+                            .map(|prefix| prefix.ends_with('.'))
+                            .unwrap_or(false)
+                }
+                (rp_id_host, request_host) => rp_id_host == request_host,
+            }
+        }
+        _ => false,
+    }
+}
 
 pub mod prelude {
     pub use crate::error::WebauthnCError;
@@ -290,7 +333,7 @@ where
                 WebauthnCError::Security
             })?;
 
-        if !WebauthnCore::origins_match(true, true, &origin, &rp_id_url) {
+        if !origins_match(true, true, &origin, &rp_id_url) {
             error!(
                 "Relying party ID ({rp_id_url}) is not a suffix of the effective domain ({origin})"
             );
@@ -365,7 +408,7 @@ where
                 WebauthnCError::Security
             })?;
 
-        if !WebauthnCore::origins_match(true, true, &origin, &rp_id_url) {
+        if !origins_match(true, true, &origin, &rp_id_url) {
             error!(
                 "Relying party ID ({rp_id_url}) is not a suffix of the effective domain ({origin})"
             );

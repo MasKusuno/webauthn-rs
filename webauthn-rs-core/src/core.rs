@@ -3693,11 +3693,7 @@ mod tests {
         // `secure_algs()`, the cryptographic path runs and confirms the
         // attestation is valid end-to-end: the returned credential is
         // ES256, the RS1 is purely on the attestation-statement signature.
-        assert!(
-            result.is_ok(),
-            "expected Ok(CredentialV5), got {:?}",
-            result,
-        );
+        assert!(result.is_ok(), "expected Ok(CredentialV5), got {result:?}");
     }
 
     /// Test `origins_match` with simple case.
