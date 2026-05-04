@@ -6,7 +6,10 @@
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use compact_jwt::{crypto::JwsX509VerifierBuilder, JwsCompact, JwtError};
+use compact_jwt::{crypto::JwsX509VerifierBuilder, JwaAlg, JwsCompact, JwsVerifier, JwtError};
+// `JwsCompact::alg()` is exposed through the `JwsVerifiable` trait; pull the
+// trait in by path since it's not re-exported at the compact_jwt crate root.
+use compact_jwt::traits::JwsVerifiable;
 use openssl::bn;
 use openssl::ecdsa;
 use openssl::hash::MessageDigest;
@@ -1257,9 +1260,9 @@ impl FidoMds {
         s: &str,
         trust_roots: &[x509::X509],
     ) -> Result<Self, JwtError> {
-        // Split compact JWS into its three parts so we can hold onto the raw
-        // signing-input bytes (header_b64 + "." + payload_b64) needed for
-        // ES256 verification.
+        // Split compact JWS into its three parts. We keep the b64-encoded
+        // header + payload in hand for the ES256 manual verification branch
+        // below; the RS256 branch reuses `jws` directly.
         let mut parts = s.trim().splitn(3, '.');
         let hdr_b64 = parts.next().ok_or(JwtError::InvalidHeaderFormat)?;
         let payload_b64 = parts.next().ok_or(JwtError::InvalidHeaderFormat)?;
@@ -1268,7 +1271,7 @@ impl FidoMds {
             return Err(JwtError::InvalidHeaderFormat);
         }
 
-        // Parse via compact_jwt just to get the parsed header (x5c chain, alg).
+        // Parse via compact_jwt to access the parsed header (x5c chain, alg).
         let jws = JwsCompact::from_str(s)?;
         let fullchain = jws
             .get_x5c_chain()
@@ -1279,9 +1282,7 @@ impl FidoMds {
             .ok_or(JwtError::InvalidHeaderFormat)?;
 
         // Verify the x5c chain against the caller-supplied trust roots using
-        // OpenSSL's X509 store. This replicates the chain-walk portion of
-        // compact_jwt's JwsX509VerifierBuilder::build (which we still exercise
-        // below for parity so its time/purpose checks also run).
+        // OpenSSL's X509 store. Alg-agnostic — applies to every MDS blob.
         let mut chain_stack = stack::Stack::new().map_err(|_| JwtError::OpenSSLError)?;
         // `fullchain` is [leaf, intermediate_0, intermediate_1, ...]; OpenSSL
         // wants intermediates only in the untrusted stack.
@@ -1308,52 +1309,100 @@ impl FidoMds {
             return Err(JwtError::OpenSSLError);
         }
 
-        // We also run compact_jwt's builder purely as a belt-and-suspenders
-        // check (its build step re-verifies the chain). It is NOT the thing
-        // that validates the signature for us — compact_jwt 0.4.3's
-        // JwsX509Verifier::verify feeds raw r||s bytes into OpenSSL's generic
-        // Verifier, which fails for ES256 JWS (spec requires raw concat,
-        // OpenSSL expects DER). We do the DER wrap + verify ourselves below.
-        let mut builder = JwsX509VerifierBuilder::new().add_fullchain(fullchain.clone());
-        for root in trust_roots {
-            builder = builder.add_trust_root(root.clone());
-        }
-        let _ = builder.build().map_err(|_| JwtError::OpenSSLError)?;
+        // Dispatch signature verification on the JWS header `alg`. FIDO
+        // Alliance has shipped the production MDS blob under both ES256 (up
+        // to early 2026) and RS256 (observed 2026-05 onwards); the tool-side
+        // `mds3.fido.tools` endpoint has historically signed ES256. Hardcoding
+        // either algorithm makes the parser brittle to the next rotation.
+        //
+        // RS256: delegate to compact_jwt's `JwsX509Verifier`. Its verify path
+        //        feeds the raw PKCS1v1.5 signature straight into OpenSSL's
+        //        Verifier (correct for RSA), after setting
+        //        `rsa::Padding::PKCS1` on the alg branch.
+        //
+        // ES256: compact_jwt 0.4.3's same path is buggy — it hands raw r||s
+        //        bytes to OpenSSL's Verifier, which expects DER-wrapped
+        //        ECDSA-Sig-Value. For ES256 only we do the DER wrap ourselves.
+        //
+        // Either branch re-builds the compact_jwt verifier from the already-
+        // walked chain. The builder's internal chain re-verification is
+        // redundant with the `verify_cert` above; keeping both means a later
+        // compact_jwt bump that tightens time/purpose checks tightens us too.
+        let header_alg = jws.alg();
+        match header_alg {
+            JwaAlg::RS256 => {
+                let mut builder = JwsX509VerifierBuilder::new().add_fullchain(fullchain.clone());
+                for root in trust_roots {
+                    builder = builder.add_trust_root(root.clone());
+                }
+                let verifier = builder.build().map_err(|e| {
+                    tracing::error!(?e, "JwsX509VerifierBuilder::build failed");
+                    JwtError::OpenSSLError
+                })?;
+                // compact_jwt's verify returns the decoded Jws body; we drop
+                // it because we re-parse the payload explicitly below to keep
+                // the FidoMds deserialization centralized.
+                let _ = JwsVerifier::verify(&verifier, &jws).map_err(|e| {
+                    tracing::error!(?e, "compact_jwt RS256 JWS verify failed");
+                    // compact_jwt reports InvalidSignature / ValidatorAlgMismatch
+                    // already; passing through preserves the distinction.
+                    e
+                })?;
+            }
+            JwaAlg::ES256 => {
+                // Belt-and-suspenders chain re-check — same as before.
+                let mut builder = JwsX509VerifierBuilder::new().add_fullchain(fullchain.clone());
+                for root in trust_roots {
+                    builder = builder.add_trust_root(root.clone());
+                }
+                let _ = builder.build().map_err(|_| JwtError::OpenSSLError)?;
 
-        // Decode the raw JWS signature (r||s, 64 bytes for ES256) and wrap
-        // it into the DER ECDSA-Sig-Value that OpenSSL's Verifier expects.
-        let sig_bytes = URL_SAFE_NO_PAD
-            .decode(sig_b64.as_bytes())
-            .map_err(|_| JwtError::OpenSSLError)?;
-        if sig_bytes.len() != 64 {
-            tracing::error!(
-                len = sig_bytes.len(),
-                "ES256 JWS signature MUST be 64 bytes (r||s)"
-            );
-            return Err(JwtError::OpenSSLError);
-        }
-        let r = bn::BigNum::from_slice(&sig_bytes[..32]).map_err(|_| JwtError::OpenSSLError)?;
-        let s_num = bn::BigNum::from_slice(&sig_bytes[32..]).map_err(|_| JwtError::OpenSSLError)?;
-        let ec_sig = ecdsa::EcdsaSig::from_private_components(r, s_num)
-            .map_err(|_| JwtError::OpenSSLError)?;
-        let der_sig = ec_sig.to_der().map_err(|_| JwtError::OpenSSLError)?;
+                // Decode the raw JWS signature (r||s, 64 bytes for ES256) and
+                // wrap it into the DER ECDSA-Sig-Value that OpenSSL's
+                // Verifier expects.
+                let sig_bytes = URL_SAFE_NO_PAD
+                    .decode(sig_b64.as_bytes())
+                    .map_err(|_| JwtError::OpenSSLError)?;
+                if sig_bytes.len() != 64 {
+                    tracing::error!(
+                        len = sig_bytes.len(),
+                        "ES256 JWS signature MUST be 64 bytes (r||s)"
+                    );
+                    return Err(JwtError::OpenSSLError);
+                }
+                let r =
+                    bn::BigNum::from_slice(&sig_bytes[..32]).map_err(|_| JwtError::OpenSSLError)?;
+                let s_num =
+                    bn::BigNum::from_slice(&sig_bytes[32..]).map_err(|_| JwtError::OpenSSLError)?;
+                let ec_sig = ecdsa::EcdsaSig::from_private_components(r, s_num)
+                    .map_err(|_| JwtError::OpenSSLError)?;
+                let der_sig = ec_sig.to_der().map_err(|_| JwtError::OpenSSLError)?;
 
-        // Verify signature over "hdr_b64.payload_b64" using the leaf public
-        // key under SHA-256.
-        let pkey = leaf.public_key().map_err(|_| JwtError::OpenSSLError)?;
-        let mut verifier = sign::Verifier::new(MessageDigest::sha256(), &pkey)
-            .map_err(|_| JwtError::OpenSSLError)?;
-        verifier
-            .update(hdr_b64.as_bytes())
-            .and_then(|_| verifier.update(b"."))
-            .and_then(|_| verifier.update(payload_b64.as_bytes()))
-            .map_err(|_| JwtError::OpenSSLError)?;
-        let valid = verifier
-            .verify(&der_sig)
-            .map_err(|_| JwtError::OpenSSLError)?;
-        if !valid {
-            tracing::error!("fido-mds JWS signature did not verify with leaf public key");
-            return Err(JwtError::InvalidSignature);
+                let pkey = leaf.public_key().map_err(|_| JwtError::OpenSSLError)?;
+                let mut verifier = sign::Verifier::new(MessageDigest::sha256(), &pkey)
+                    .map_err(|_| JwtError::OpenSSLError)?;
+                verifier
+                    .update(hdr_b64.as_bytes())
+                    .and_then(|_| verifier.update(b"."))
+                    .and_then(|_| verifier.update(payload_b64.as_bytes()))
+                    .map_err(|_| JwtError::OpenSSLError)?;
+                let valid = verifier
+                    .verify(&der_sig)
+                    .map_err(|_| JwtError::OpenSSLError)?;
+                if !valid {
+                    tracing::error!(
+                        "fido-mds ES256 JWS signature did not verify with leaf public key"
+                    );
+                    return Err(JwtError::InvalidSignature);
+                }
+            }
+            other => {
+                tracing::error!(
+                    ?other,
+                    "fido-mds JWS signed with an algorithm this parser does not accept"
+                );
+                return Err(JwtError::ValidatorAlgMismatch);
+            }
         }
 
         // Signature verified; decode the payload and parse into FidoMds.
