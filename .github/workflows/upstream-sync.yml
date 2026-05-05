@@ -45,7 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout ml-dsa-verify
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ml-dsa-verify
           fetch-depth: 0
