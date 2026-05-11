@@ -1150,6 +1150,14 @@ pub(crate) enum TpmVendor {
     StMicroelectronics,
     TexasInstruments,
     Winbond,
+    /// FIDO2 Server conformance tool's synthetic test-harness vendor
+    /// (`id:FFFFF1D0`). Emitted by the tool's bundled TPM fixtures
+    /// (`tpmAIK.js:251` and `tpmECC.js:286` inside its `app.asar`).
+    /// Not a TCG-registered vendor. Accepted only when the
+    /// `fido-conformance-testing` feature is on — gated because production
+    /// RPs must not accept synthetic vendor IDs.
+    #[cfg(feature = "fido-conformance-testing")]
+    FidoConformanceTestHarness,
 }
 
 // The value of the TPMManufacturer attribute MUST be the ASCII representation
@@ -1185,6 +1193,8 @@ impl TryFrom<&[u8; 8]> for TpmVendor {
             b"53544D20" => Ok(Self::StMicroelectronics),
             b"54584E00" => Ok(Self::TexasInstruments),
             b"57454300" => Ok(Self::Winbond),
+            #[cfg(feature = "fido-conformance-testing")]
+            b"FFFFF1D0" => Ok(Self::FidoConformanceTestHarness),
             _ => Err(WebauthnError::ParseNOMFailure),
         }
     }
@@ -1385,5 +1395,34 @@ mod tests {
         let cred_migrated: Credential = cred.into();
 
         println!("{cred_migrated:?}");
+    }
+
+    // Real TCG-registered vendor (Infineon) — always accepted, feature off or on.
+    #[test]
+    fn tpm_vendor_infineon_always_accepted() {
+        use super::TpmVendor;
+        let parsed = TpmVendor::try_from(b"49465800").expect("Infineon must parse");
+        assert!(matches!(parsed, TpmVendor::Infineon));
+    }
+
+    // FIDO2 Server conformance tool's synthetic vendor — rejected by default.
+    #[cfg(not(feature = "fido-conformance-testing"))]
+    #[test]
+    fn tpm_vendor_fido_synthetic_rejected_without_feature() {
+        use super::TpmVendor;
+        let result = TpmVendor::try_from(b"FFFFF1D0");
+        assert!(
+            result.is_err(),
+            "FFFFF1D0 must not be accepted without fido-conformance-testing feature"
+        );
+    }
+
+    // With the fido-conformance-testing feature on, the synthetic vendor parses.
+    #[cfg(feature = "fido-conformance-testing")]
+    #[test]
+    fn tpm_vendor_fido_synthetic_accepted_with_feature() {
+        use super::TpmVendor;
+        let parsed = TpmVendor::try_from(b"FFFFF1D0").expect("FFFFF1D0 must parse with feature on");
+        assert!(matches!(parsed, TpmVendor::FidoConformanceTestHarness));
     }
 }

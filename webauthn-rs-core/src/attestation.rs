@@ -2,7 +2,10 @@
 //! This contains a transparent type allowing callbacks to
 //! make attestation decisions.
 
-use crate::crypto::{compute_sha256, only_hash_from_type, verify_signature, TpmSanData};
+use crate::crypto::{
+    compute_sha256, compute_sha384, compute_sha512, only_hash_from_type, verify_signature,
+    TpmSanData,
+};
 use crate::error::WebauthnError;
 use crate::internals::*;
 use crate::proto::*;
@@ -972,13 +975,32 @@ pub(crate) fn verify_tpm_attestation(
             };
             // Name contains two bytes at the start for what algo is used. The spec
             // says nothing about validating them, so instead we prepend the bytes into the hash
-            // so we do enforce these are checked
+            // so we do enforce these are checked.
+            //
+            // TPM Alg IDs (TCG Algorithm Registry, Revision 1.32, §4):
+            //   SHA-1   = 0x0004 (rejected: INSECURE)
+            //   SHA-256 = 0x000B
+            //   SHA-384 = 0x000C
+            //   SHA-512 = 0x000D
             let hname = match pubarea.name_alg {
                 TpmAlgId::Sha256 => {
-                    let mut v = vec![0, 11];
-                    let r = compute_sha256(pubarea_bytes);
-                    v.append(&mut r.to_vec());
+                    let mut v = vec![0, 0x0B];
+                    v.extend_from_slice(&compute_sha256(pubarea_bytes));
                     v
+                }
+                TpmAlgId::Sha384 => {
+                    let mut v = vec![0, 0x0C];
+                    v.extend_from_slice(&compute_sha384(pubarea_bytes));
+                    v
+                }
+                TpmAlgId::Sha512 => {
+                    let mut v = vec![0, 0x0D];
+                    v.extend_from_slice(&compute_sha512(pubarea_bytes));
+                    v
+                }
+                TpmAlgId::Sha1 => {
+                    warn!("TPM pubArea nameAlg is SHA-1; rejecting as INSECURE");
+                    return Err(WebauthnError::CredentialInsecureCryptography);
                 }
                 _ => return Err(WebauthnError::AttestationTpmPubAreaHashUnknown),
             };

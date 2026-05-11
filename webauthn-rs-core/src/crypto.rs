@@ -23,7 +23,7 @@ use crypto_glue::{
         // EcdsaP521Signature, EcdsaP521VerifyingKey,
     },
     rsa::{BigUint, RS256PublicKey, RS256Signature, RS256VerifyingKey},
-    s256,
+    s256, s384, s512,
     traits::{Digest, OwnedToRef, Verifier},
     x509::{self, Certificate, GeneralName, ObjectIdentifier, OtherName, SubjectAltName},
 };
@@ -132,24 +132,44 @@ impl<'a> TryFrom<&'a SubjectAltName> for TpmSanData<'a> {
     }
 }
 
-/// Hash `input` under the digest implied by `alg`. Used by the TPM
-/// attestation path to compute `extraData == hash(attToBeSigned)`.
+/// Hash `input` with the digest implied by the COSE signing algorithm `alg`.
 ///
-/// SHA-1 (under `INSECURE_RS1`) is recognised here as a **verifier
-/// capability**, not a recommendation: the function answers the question
-/// "what digest does alg-N imply" and an RP's policy layer
-/// (`secure_algs()`, tenant allowlists, AAL profile) decides whether a
-/// credential signed with alg-N may be enrolled. Returning an error here
-/// would prevent legitimate consumers (FIDO Conformance Tool, WebAuthn L1
-/// interop fixtures, Windows Hello TPM firmwares) from running TPM RS1
-/// verification end-to-end.
+/// Used by the TPM attestation verifier (WebAuthn §8.3 step "Verify that
+/// extraData is set to the hash of attToBeSigned using the hash algorithm
+/// employed in alg"). The hash size maps directly off the alg:
+///
+/// * `ES256` / `RS256` / `PS256` → SHA-256
+/// * `ES384` / `RS384` / `PS384` → SHA-384
+/// * `ES512` / `RS512` / `PS512` → SHA-512
+/// * `INSECURE_RS1` → SHA-1
+///
+/// SHA-1 is recognised here as a **verifier capability**, not a
+/// recommendation: the function answers the question "what digest does
+/// alg-N imply" and an RP's policy layer (`secure_algs()`, tenant
+/// allowlists, AAL profile) decides whether a credential signed with
+/// alg-N may be enrolled. `EDDSA` and `PinUvProtocol` do not appear in
+/// TPM signing algorithms and return `COSEKeyInvalidType`.
 pub(crate) fn only_hash_from_type(
     alg: COSEAlgorithm,
     input: &[u8],
 ) -> Result<Vec<u8>, WebauthnError> {
     use crypto_glue::sha1::Sha1;
-    use crypto_glue::traits::Digest;
     match alg {
+        COSEAlgorithm::ES256 | COSEAlgorithm::RS256 | COSEAlgorithm::PS256 => {
+            let mut hasher = s256::Sha256::new();
+            hasher.update(input);
+            Ok(hasher.finalize().to_vec())
+        }
+        COSEAlgorithm::ES384 | COSEAlgorithm::RS384 | COSEAlgorithm::PS384 => {
+            let mut hasher = s384::Sha384::new();
+            hasher.update(input);
+            Ok(hasher.finalize().to_vec())
+        }
+        COSEAlgorithm::ES521 | COSEAlgorithm::RS512 | COSEAlgorithm::PS512 => {
+            let mut hasher = s512::Sha512::new();
+            hasher.update(input);
+            Ok(hasher.finalize().to_vec())
+        }
         COSEAlgorithm::INSECURE_RS1 => {
             let mut hasher = Sha1::new();
             hasher.update(input);
@@ -763,6 +783,20 @@ fn ml_dsa_verify_signature(
 /// Compute the sha256 of a slice of data.
 pub fn compute_sha256(data: &[u8]) -> [u8; 32] {
     let mut hasher = s256::Sha256::new();
+    hasher.update(data);
+    *hasher.finalize().as_ref()
+}
+
+/// Compute the sha384 of a slice of data.
+pub fn compute_sha384(data: &[u8]) -> [u8; 48] {
+    let mut hasher = s384::Sha384::new();
+    hasher.update(data);
+    *hasher.finalize().as_ref()
+}
+
+/// Compute the sha512 of a slice of data.
+pub fn compute_sha512(data: &[u8]) -> [u8; 64] {
+    let mut hasher = s512::Sha512::new();
     hasher.update(data);
     *hasher.finalize().as_ref()
 }
