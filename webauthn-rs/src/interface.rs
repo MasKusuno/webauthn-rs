@@ -43,6 +43,14 @@ pub struct PasskeyAuthentication {
     pub(crate) ast: AuthenticationState,
 }
 
+impl PasskeyAuthentication {
+    /// Inject resolved credentials for discoverable-credential flows.
+    pub fn set_allowed_credentials(&mut self, creds: Vec<Passkey>) {
+        let inner: Vec<Credential> = creds.into_iter().map(|pk| pk.cred).collect();
+        self.ast.set_allowed_credentials(inner);
+    }
+}
+
 /// A Passkey for a user. A passkey is a term that covers all possible authenticators that may exist.
 /// These could be roaming credentials such as Apple's Account back passkeys, they could be a users
 /// Yubikey, a Windows Hello TPM, or even a password manager softtoken.
