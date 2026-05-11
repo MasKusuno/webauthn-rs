@@ -132,15 +132,28 @@ impl<'a> TryFrom<&'a SubjectAltName> for TpmSanData<'a> {
     }
 }
 
+/// Hash `input` under the digest implied by `alg`. Used by the TPM
+/// attestation path to compute `extraData == hash(attToBeSigned)`.
+///
+/// SHA-1 (under `INSECURE_RS1`) is recognised here as a **verifier
+/// capability**, not a recommendation: the function answers the question
+/// "what digest does alg-N imply" and an RP's policy layer
+/// (`secure_algs()`, tenant allowlists, AAL profile) decides whether a
+/// credential signed with alg-N may be enrolled. Returning an error here
+/// would prevent legitimate consumers (FIDO Conformance Tool, WebAuthn L1
+/// interop fixtures, Windows Hello TPM firmwares) from running TPM RS1
+/// verification end-to-end.
 pub(crate) fn only_hash_from_type(
     alg: COSEAlgorithm,
-    _input: &[u8],
+    input: &[u8],
 ) -> Result<Vec<u8>, WebauthnError> {
+    use crypto_glue::sha1::Sha1;
+    use crypto_glue::traits::Digest;
     match alg {
         COSEAlgorithm::INSECURE_RS1 => {
-            // sha1
-            warn!("INSECURE SHA1 USAGE DETECTED");
-            Err(WebauthnError::CredentialInsecureCryptography)
+            let mut hasher = Sha1::new();
+            hasher.update(input);
+            Ok(hasher.finalize().to_vec())
         }
         c_alg => {
             debug!(?c_alg, "WebauthnError::COSEKeyInvalidType");
@@ -250,14 +263,24 @@ impl TryFrom<&serde_cbor_2::Value> for COSEKey {
             cose_key.validate()?;
             // return it
             Ok(cose_key)
-        } else if key_type == (COSEKeyTypeId::EC_RSA as i128) && (type_ == COSEAlgorithm::RS256) {
+        } else if key_type == (COSEKeyTypeId::EC_RSA as i128)
+            && (type_ == COSEAlgorithm::RS256 || type_ == COSEAlgorithm::INSECURE_RS1)
+        {
             // RSAKey
-
+            //
+            // Valid modulus lengths expressed in bytes: 128 (RSA-1024),
+            // 256 (RSA-2048), 384 (RSA-3072), 512 (RSA-4096). The RSA-2048
+            // fixture is what production WebAuthn deployments ship; the
+            // shorter variants are retained so the verifier can inspect
+            // legacy-shape attestations (WebAuthn L1 interop harnesses,
+            // TPM INSECURE_RS1 fixtures from the FIDO Conformance Tool).
+            // Policy on whether such a credential is accepted lives in
+            // the consumer — `secure_algs()` omits RS1, and AAL profiles
+            // further restrict modulus size independently of this parser.
+            //
             // -37 -> PS256
             // -257 -> RS256 aka RSASSA-PKCS1-v1_5 with SHA-256
-
-            // -1 -> n 256 bytes
-            // -2 -> e 3 bytes
+            // -65535 -> INSECURE_RS1 aka RSASSA-PKCS1-v1_5 with SHA-1
 
             let n_value = m
                 .get(&serde_cbor_2::Value::Integer(-1))
@@ -269,7 +292,7 @@ impl TryFrom<&serde_cbor_2::Value> for COSEKey {
                 .ok_or(WebauthnError::COSEKeyInvalidCBORValue)?;
             let e = cbor_try_bytes!(e_value)?;
 
-            if n.len() != 256 || e.len() != 3 {
+            if !matches!(n.len(), 128 | 256 | 384 | 512) || e.len() != 3 {
                 return Err(WebauthnError::COSEKeyRSANEInvalid);
             }
 
@@ -614,6 +637,35 @@ impl COSEKey {
                 Ok(false)
             }
             COSEKeyPublic::RsaS256(pub_key) => {
+                // INSECURE_RS1 (COSE alg -65535): RSASSA-PKCS1-v1_5 over
+                // SHA-1. Recognised here as a verifier capability — see
+                // `only_hash_from_type`'s rationale. Policy gating still
+                // applies at the consumer (`secure_algs()` omits RS1).
+                if self.type_ == COSEAlgorithm::INSECURE_RS1 {
+                    use crypto_glue::rsa::pkcs1v15::Pkcs1v15Sign;
+                    use crypto_glue::sha1::Sha1;
+                    use crypto_glue::traits::Digest;
+
+                    // PKCS#1 v1.5 DigestInfo DER encoding for SHA-1. RFC 3447
+                    // / RFC 8017 §9.2 — fixed 15-byte prefix prepended to the
+                    // 20-byte SHA-1 digest before RSA-modular-exp verification.
+                    // crypto-glue does not enable the `oid` feature on
+                    // `sha1::Sha1` so `Pkcs1v15Sign::new::<Sha1>()` (which
+                    // resolves the prefix from `AssociatedOid`) is unavailable;
+                    // the constant below is the canonical DigestInfo bytes.
+                    const SHA1_DIGEST_INFO_PREFIX: [u8; 15] = [
+                        0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e,
+                        0x03, 0x02, 0x1a, 0x05, 0x00, 0x04, 0x14,
+                    ];
+                    let scheme = Pkcs1v15Sign {
+                        hash_len: Some(20),
+                        prefix: Box::from(&SHA1_DIGEST_INFO_PREFIX[..]),
+                    };
+                    let mut hasher = Sha1::new();
+                    hasher.update(verification_data);
+                    let hashed = hasher.finalize();
+                    return Ok(pub_key.verify(scheme, &hashed, signature).is_ok());
+                }
                 let signature = RS256Signature::try_from(signature)
                     .map_err(|_err| WebauthnError::SignatureInvalid)?;
                 let verifier = RS256VerifyingKey::new(pub_key);
