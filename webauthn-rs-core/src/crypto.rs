@@ -389,11 +389,15 @@ impl TryFrom<&serde_cbor_2::Value> for COSEKey {
         {
             // draft-ietf-cose-dilithium §5 — AKP key type for ML-DSA. Single
             // public-key member at label -1 carrying raw FIPS 204 encoded bytes.
+            // The outer `if` already narrows `type_` to one of these three
+            // ML-DSA variants; the wildcard arm is unreachable in practice
+            // but spelt as a real Err so clippy's `deny(clippy::unreachable)`
+            // (under `deny(warnings)`) can see through the guard.
             let param_set = match type_ {
                 COSEAlgorithm::ML_DSA_44 => MlDsaParamSet::MlDsa44,
                 COSEAlgorithm::ML_DSA_65 => MlDsaParamSet::MlDsa65,
                 COSEAlgorithm::ML_DSA_87 => MlDsaParamSet::MlDsa87,
-                _ => unreachable!(),
+                _ => return Err(WebauthnError::COSEKeyInvalidType),
             };
 
             let pk_value = m
@@ -674,8 +678,8 @@ impl COSEKey {
                     // resolves the prefix from `AssociatedOid`) is unavailable;
                     // the constant below is the canonical DigestInfo bytes.
                     const SHA1_DIGEST_INFO_PREFIX: [u8; 15] = [
-                        0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e,
-                        0x03, 0x02, 0x1a, 0x05, 0x00, 0x04, 0x14,
+                        0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05,
+                        0x00, 0x04, 0x14,
                     ];
                     let scheme = Pkcs1v15Sign {
                         hash_len: Some(20),
@@ -740,8 +744,8 @@ fn ml_dsa_verify_signature(
             let sig_enc = EncodedSignature::<MlDsa44>::try_from(signature)
                 .map_err(|_| WebauthnError::COSEKeyInvalidType)?;
             let vk = VerifyingKey::<MlDsa44>::decode(&pk_enc);
-            let sig = Signature::<MlDsa44>::decode(&sig_enc)
-                .ok_or(WebauthnError::COSEKeyInvalidType)?;
+            let sig =
+                Signature::<MlDsa44>::decode(&sig_enc).ok_or(WebauthnError::COSEKeyInvalidType)?;
             vk.verify(verification_data, &sig).is_ok()
         }
         MlDsaParamSet::MlDsa65 => {
@@ -750,8 +754,8 @@ fn ml_dsa_verify_signature(
             let sig_enc = EncodedSignature::<MlDsa65>::try_from(signature)
                 .map_err(|_| WebauthnError::COSEKeyInvalidType)?;
             let vk = VerifyingKey::<MlDsa65>::decode(&pk_enc);
-            let sig = Signature::<MlDsa65>::decode(&sig_enc)
-                .ok_or(WebauthnError::COSEKeyInvalidType)?;
+            let sig =
+                Signature::<MlDsa65>::decode(&sig_enc).ok_or(WebauthnError::COSEKeyInvalidType)?;
             vk.verify(verification_data, &sig).is_ok()
         }
         MlDsaParamSet::MlDsa87 => {
@@ -760,8 +764,8 @@ fn ml_dsa_verify_signature(
             let sig_enc = EncodedSignature::<MlDsa87>::try_from(signature)
                 .map_err(|_| WebauthnError::COSEKeyInvalidType)?;
             let vk = VerifyingKey::<MlDsa87>::decode(&pk_enc);
-            let sig = Signature::<MlDsa87>::decode(&sig_enc)
-                .ok_or(WebauthnError::COSEKeyInvalidType)?;
+            let sig =
+                Signature::<MlDsa87>::decode(&sig_enc).ok_or(WebauthnError::COSEKeyInvalidType)?;
             vk.verify(verification_data, &sig).is_ok()
         }
     };

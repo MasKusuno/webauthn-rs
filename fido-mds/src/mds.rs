@@ -13,7 +13,6 @@ use crypto_glue::{
     ecdsa_p256::{EcdsaP256PublicKey, EcdsaP256Signature, EcdsaP256VerifyingKey},
     traits::{OwnedToRef, Verifier},
 };
-use x509_cert::crl::CertificateList;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -21,6 +20,7 @@ use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 use std::time::SystemTime;
 use uuid::Uuid;
+use x509_cert::crl::CertificateList;
 
 static GLOBAL_SIGN_ROOT_CA_R3: &str = r#"
 -----BEGIN CERTIFICATE-----
@@ -1301,10 +1301,7 @@ impl FidoMds {
                 for crl in crls {
                     if let Some(revoked) = &crl.tbs_cert_list.revoked_certificates {
                         if revoked.iter().any(|r| r.serial_number == *serial) {
-                            tracing::error!(
-                                "MDS x5c contains revoked cert (serial {:?})",
-                                serial
-                            );
+                            tracing::error!("MDS x5c contains revoked cert (serial {:?})", serial);
                             return Err(JwtError::X5cChainNotTrusted);
                         }
                     }
@@ -1361,7 +1358,10 @@ fn verify_and_release_es256(jws_str: &str, leaf: &Certificate) -> Result<FidoMds
         .map_err(|_| JwtError::InvalidSignature)?;
 
     let signature = EcdsaP256Signature::from_slice(&sig_raw).map_err(|_| {
-        tracing::error!(actual_len = sig_raw.len(), "ES256 signature is not raw r||s");
+        tracing::error!(
+            actual_len = sig_raw.len(),
+            "ES256 signature is not raw r||s"
+        );
         JwtError::InvalidSignature
     })?;
 

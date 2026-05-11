@@ -1244,16 +1244,16 @@ impl WebauthnCore {
 
                         // Ensure "badexample.com" doesn't match "example.com", but
                         // "sub.example.com" does.
-                        return allow_subdomains_origin
+                        allow_subdomains_origin
                             && request_domain
                                 .strip_suffix(&rp_id_domain)
                                 .map(|prefix| prefix.ends_with('.'))
-                                .unwrap_or(false);
+                                .unwrap_or(false)
                     }
 
                     (rp_id_host, request_host) => {
                         // At least one is a non-domain host, always require exact match.
-                        return rp_id_host == request_host;
+                        rp_id_host == request_host
                     }
                 }
             }
@@ -4091,8 +4091,7 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(WebauthnError::COSEKeyInvalidCBORValue)
-                    | Err(WebauthnError::ParseNOMFailure)
+                Err(WebauthnError::COSEKeyInvalidCBORValue) | Err(WebauthnError::ParseNOMFailure)
             ),
             "expected rejection, got: {result:?}"
         );
