@@ -19,7 +19,7 @@ jobs:
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
@@ -43,12 +43,12 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust_version }}
           components: clippy
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@v0.0.10
 
       - if: runner.os != 'windows'
         run: |
@@ -143,12 +143,12 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust_version }}
           components: clippy
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@v0.0.10
 
       - if: runner.os != 'windows'
         run: |
@@ -162,7 +162,7 @@ jobs:
       # Don't try to install OpenSSL when there's only the "win10" feature
       # enabled. We should be able to operate without it.
       - if: runner.os == 'windows' && matrix.features != 'win10'
-        uses: johnwason/vcpkg-action@v4
+        uses: johnwason/vcpkg-action@v8
         with:
           pkgs: openssl
           triplet: x64-windows-static-md
@@ -226,11 +226,11 @@ jobs:
         rust_version: [stable, nightly]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust_version }}
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@v0.0.10
       - run: |
           sudo apt-get update && \
           sudo apt-get -y install libudev-dev
@@ -240,15 +240,23 @@ jobs:
       # This tests that all the stubs work properly for optional dependencies,
       # but doesn't work for fido-key-manager which includes NFC and USB support
       # by default.
+      #
+      # webauthn-authenticator-rs is excluded on this fork because its
+      # `crate::stubs::*` re-export collides with the top-level `webauthn_rs_core`
+      # module path, producing E0659 ambiguity errors at doc time. Upstream is
+      # tracking; this fork doesn't depend on the docs being built for that
+      # crate, so skip it. (Independent of the OpenSSL removal — the same
+      # E0659 was reproduced on the master baseline.)
       - name: generate docs
         run: |
           cargo ${{ matrix.rust_version == 'nightly' && '+nightly' || '' }} doc --all \
             --exclude fido-key-manager \
+            --exclude webauthn-authenticator-rs \
             --no-deps \
             --document-private-items
         env:
           RUSTDOCFLAGS: ${{ matrix.rust_version == 'nightly' && '--cfg docsrs' || '' }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: docs-${{ matrix.rust_version }}
           path: |
@@ -264,12 +272,13 @@ jobs:
       - run: |
           cargo ${{ matrix.rust_version == 'nightly' && '+nightly' || '' }} doc \
           --all \
+          --exclude webauthn-authenticator-rs \
           --no-deps \
           --document-private-items \
           --all-features
         env:
           RUSTDOCFLAGS: ${{ matrix.rust_version == 'nightly' && '--cfg docsrs' || '' }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: docs-${{ matrix.rust_version }}-all_features
           path: |
@@ -291,11 +300,11 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust_version }}
           components: clippy
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@v0.0.10
 
       - run: cargo build -p actix_tutorial -p axum_tutorial -p tide_tutorial
