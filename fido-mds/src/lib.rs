@@ -279,81 +279,89 @@ impl TryFrom<RawStatusReport> for StatusReport {
                 authenticator_version: authenticator_version.unwrap_or(0),
                 url,
             }),
+            // civid#128 Resp-6 F-2 parse-tolerance: the FIDO Conformance
+            // Tool's test MDS blob ships status reports without the
+            // `authenticatorVersion` field (e.g. UserKeyRemoteCompromise
+            // with effective_date only). The spec's MetadataBLOBPayloadEntry
+            // makes authenticatorVersion optional, so unwrap to 0 (the same
+            // default NotFidoCertified uses) rather than rejecting the row
+            // — a missing field should not upgrade a revoked authenticator
+            // to "drop the whole entry". Matches the MDS3 §3.1.5 spec.
             RawStatusReport {
                 status: AuthenticatorStatus::SelfAssertionSubmitted,
                 effective_date,
-                authenticator_version: Some(authenticator_version),
+                authenticator_version,
                 ..
             } => Ok(StatusReport::SelfAssertionSubmitted {
                 effective_date,
-                authenticator_version,
+                authenticator_version: authenticator_version.unwrap_or(0),
             }),
             RawStatusReport {
                 status: AuthenticatorStatus::UserVerificationBypass,
                 effective_date,
-                authenticator_version: Some(authenticator_version),
+                authenticator_version,
                 url,
                 ..
             } => Ok(StatusReport::UserVerificationBypass {
                 effective_date,
-                authenticator_version,
+                authenticator_version: authenticator_version.unwrap_or(0),
                 url,
             }),
             RawStatusReport {
                 status: AuthenticatorStatus::AttestationKeyCompromise,
                 effective_date,
-                authenticator_version: Some(authenticator_version),
+                authenticator_version,
                 certificate,
                 url,
                 ..
             } => Ok(StatusReport::AttestationKeyCompromise {
                 effective_date,
-                authenticator_version,
+                authenticator_version: authenticator_version.unwrap_or(0),
                 certificate,
                 url,
             }),
             RawStatusReport {
                 status: AuthenticatorStatus::UserKeyRemoteCompromise,
                 effective_date,
-                authenticator_version: Some(authenticator_version),
+                authenticator_version,
                 url,
                 ..
             } => Ok(StatusReport::UserKeyRemoteCompromise {
                 effective_date,
-                authenticator_version,
+                authenticator_version: authenticator_version.unwrap_or(0),
                 url,
             }),
             RawStatusReport {
                 status: AuthenticatorStatus::UserKeyPhysicalCompromise,
                 effective_date,
-                authenticator_version: Some(authenticator_version),
+                authenticator_version,
                 url,
                 ..
             } => Ok(StatusReport::UserKeyPhysicalCompromise {
                 effective_date,
-                authenticator_version,
+                authenticator_version: authenticator_version.unwrap_or(0),
                 url,
             }),
             RawStatusReport {
                 status: AuthenticatorStatus::Revoked,
                 effective_date,
-                authenticator_version: Some(authenticator_version),
+                authenticator_version,
                 url,
                 ..
             } => Ok(StatusReport::Revoked {
                 effective_date,
-                authenticator_version,
+                authenticator_version: authenticator_version.unwrap_or(0),
                 url,
             }),
             RawStatusReport {
                 status: AuthenticatorStatus::UpdateAvailable,
                 effective_date,
-                authenticator_version: Some(authenticator_version),
+                authenticator_version,
                 url,
                 ..
             } => Ok(StatusReport::UpdateAvailable {
                 effective_date,
-                authenticator_version,
+                authenticator_version: authenticator_version.unwrap_or(0),
                 url,
             }),
             RawStatusReport {
@@ -489,10 +497,6 @@ impl TryFrom<RawStatusReport> for StatusReport {
                 certification_requirements_version,
                 url,
             }),
-            sr => {
-                warn!("Invalid Status Report - {:?}", sr);
-                Err(())
-            }
         }
     }
 }
@@ -1453,6 +1457,20 @@ impl FidoMds {
         trust_roots: &[Certificate],
     ) -> Result<Self, JwtError> {
         RawFidoMds::from_str_with_trust_roots(s, trust_roots).map(|rawmds| rawmds.into())
+    }
+
+    /// Parse an MDS JWS blob against caller-supplied X509 trust roots
+    /// **and** caller-supplied CRLs. See
+    /// [`crate::mds::FidoMds::from_str_with_trust_roots_and_crls`] —
+    /// civid#430 Phase B / FIDO Conformance Tool Server-MDS3 F-5.
+    /// Empty `crls` is equivalent to `from_str_with_trust_roots`.
+    pub fn from_str_with_trust_roots_and_crls(
+        s: &str,
+        trust_roots: &[Certificate],
+        crls: &[x509_cert::crl::CertificateList],
+    ) -> Result<Self, JwtError> {
+        RawFidoMds::from_str_with_trust_roots_and_crls(s, trust_roots, crls)
+            .map(|rawmds| rawmds.into())
     }
 
     pub fn fido2_query(&self, query: &Query) -> Option<Vec<rc::Rc<FIDO2>>> {

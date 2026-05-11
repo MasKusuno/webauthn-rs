@@ -5,9 +5,15 @@
 //! for more.
 
 use compact_jwt::{
+    compact::JwaAlg,
     crypto::{Certificate, DecodePem, JwsX509VerifierBuilder},
     JwsCompact, JwsVerifier, JwtError,
 };
+use crypto_glue::{
+    ecdsa_p256::{EcdsaP256PublicKey, EcdsaP256Signature, EcdsaP256VerifyingKey},
+    traits::{OwnedToRef, Verifier},
+};
+use x509_cert::crl::CertificateList;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -1232,6 +1238,41 @@ impl FidoMds {
         s: &str,
         trust_roots: &[Certificate],
     ) -> Result<Self, JwtError> {
+        Self::from_str_with_trust_roots_and_crls(s, trust_roots, &[])
+    }
+
+    /// Parse an MDS JWS blob, verifying its signature against the caller-
+    /// supplied set of trust-root X509 certificates **and** refusing any
+    /// chain whose certs appear in any caller-supplied CRL.
+    ///
+    /// civid#430 Phase B / FIDO Conformance Tool Server-MDS3 F-5
+    /// (`fido2_subjectCertificateRevoked`) publishes a test MDS blob whose
+    /// x5c chain walks OK but whose leaf CA has been revoked via CRL. Strict
+    /// MDS3 servers must refuse it. The base path uses no CRLs, which gives
+    /// the correct answer for the FIDO Alliance production MDS blob; this
+    /// entry point lets dev/test deployments pin a CRL.
+    ///
+    /// Implementation walks each cert in (leaf || chain) against each CRL.
+    /// Any cert whose serial matches a `revoked_certificates` entry returns
+    /// `JwtError::X5cChainNotTrusted`. Empty `crls` reduces to the prior
+    /// behaviour, so existing callers see no change.
+    ///
+    /// Alg dispatch: the live `mds.fidoalliance.org` blob is RS256 today;
+    /// `mds3.fido.tools` test fixtures and earlier production blobs are
+    /// ES256. compact_jwt 0.5.6's `JwsX509Verifier::verify` delegates to
+    /// `crypto_glue::x509::x509_verify_signature`, which feeds the raw JWS
+    /// signature bytes to `EcdsaP256Signature::from_der` — that's a DER
+    /// mismatch for ES256 (the JWS format is raw `r || s`, RFC 7515 §3.4)
+    /// so ES256 blobs always fail with `InvalidSignature` through that
+    /// path. Keep an explicit ES256 verify branch that re-parses the JWS
+    /// compact form and decodes the signature with
+    /// `EcdsaP256Signature::from_slice`. RS256 stays on the `compact_jwt`
+    /// path (it goes through `RS256VerifyingKey` correctly).
+    pub fn from_str_with_trust_roots_and_crls(
+        s: &str,
+        trust_roots: &[Certificate],
+        crls: &[CertificateList],
+    ) -> Result<Self, JwtError> {
         let jws = JwsCompact::from_str(s)?;
 
         let (leaf, chain) = jws
@@ -1240,21 +1281,109 @@ impl FidoMds {
 
         let now = SystemTime::now();
 
+        // Build the X.509 verifier — runs the chain walk against trust
+        // roots. compact_jwt's JwsX509Verifier validates *the chain* here;
+        // for ES256 we still need to do the actual signature verification
+        // ourselves below because of the DER-vs-r||s mismatch.
         let mut builder = JwsX509VerifierBuilder::new(&leaf, &chain);
         for root in trust_roots {
             builder = builder.add_trust_root(root.clone());
         }
         let verifier = builder.build(now).map_err(|_| JwtError::CryptoError)?;
 
-        // Now we can release the embedded cert, since we have asserted the trust in the chain
-        // that has signed this metadata.
-        let released = verifier.verify(&jws)?;
+        // Optional CRL consultation. compact_jwt's `X509Store` does not
+        // integrate CRLs; fold them in at this layer by walking each cert
+        // against each CRL's revoked_certificates list.
+        if !crls.is_empty() {
+            let all_certs = std::iter::once(&leaf).chain(chain.iter());
+            for cert in all_certs {
+                let serial = &cert.tbs_certificate.serial_number;
+                for crl in crls {
+                    if let Some(revoked) = &crl.tbs_cert_list.revoked_certificates {
+                        if revoked.iter().any(|r| r.serial_number == *serial) {
+                            tracing::error!(
+                                "MDS x5c contains revoked cert (serial {:?})",
+                                serial
+                            );
+                            return Err(JwtError::X5cChainNotTrusted);
+                        }
+                    }
+                }
+            }
+        }
 
-        let metadata: FidoMds = released.from_json().map_err(|serde_err| {
-            tracing::error!(?serde_err);
-            JwtError::Serde
-        })?;
-
-        Ok(metadata)
+        // Alg-aware signature verification. RS256 → delegate; ES256 →
+        // manual decode of raw r||s sig.
+        let alg = jws.header().alg;
+        match alg {
+            JwaAlg::RS256 => {
+                let released = verifier.verify(&jws)?;
+                let metadata: FidoMds = released.from_json().map_err(|serde_err| {
+                    tracing::error!(?serde_err);
+                    JwtError::Serde
+                })?;
+                Ok(metadata)
+            }
+            JwaAlg::ES256 => verify_and_release_es256(s, &leaf),
+            other => {
+                tracing::error!(?other, "MDS JWS uses unsupported alg");
+                Err(JwtError::ValidatorAlgMismatch)
+            }
+        }
     }
+}
+
+/// Manually verify an ES256 JWS signature against `leaf`'s public key, then
+/// decode the JSON payload. compact_jwt 0.5.6 cannot do this end-to-end
+/// (see comment on `from_str_with_trust_roots_and_crls`). Re-parses the
+/// JWS Compact Serialisation (RFC 7515 §3.1: `b64hdr.b64payload.b64sig`)
+/// because compact_jwt's internal byte slices are crate-private.
+fn verify_and_release_es256(jws_str: &str, leaf: &Certificate) -> Result<FidoMds, JwtError> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+
+    let mut parts = jws_str.split('.');
+    let hdr_b64 = parts.next().ok_or(JwtError::InvalidHeaderFormat)?;
+    let payload_b64 = parts.next().ok_or(JwtError::InvalidHeaderFormat)?;
+    let sig_b64 = parts.next().ok_or(JwtError::InvalidHeaderFormat)?;
+    if parts.next().is_some() {
+        return Err(JwtError::InvalidHeaderFormat);
+    }
+
+    let signed_input_len = hdr_b64.len() + 1 + payload_b64.len();
+    let mut signed_input = Vec::with_capacity(signed_input_len);
+    signed_input.extend_from_slice(hdr_b64.as_bytes());
+    signed_input.push(b'.');
+    signed_input.extend_from_slice(payload_b64.as_bytes());
+
+    let sig_raw = URL_SAFE_NO_PAD
+        .decode(sig_b64)
+        .map_err(|_| JwtError::InvalidSignature)?;
+
+    let signature = EcdsaP256Signature::from_slice(&sig_raw).map_err(|_| {
+        tracing::error!(actual_len = sig_raw.len(), "ES256 signature is not raw r||s");
+        JwtError::InvalidSignature
+    })?;
+
+    let spki = leaf.tbs_certificate.subject_public_key_info.owned_to_ref();
+    let pub_key = EcdsaP256PublicKey::try_from(spki).map_err(|_| {
+        tracing::error!("ES256 leaf public key extraction failed");
+        JwtError::InvalidSignature
+    })?;
+    let verifier = EcdsaP256VerifyingKey::from(&pub_key);
+
+    // `EcdsaP256VerifyingKey::verify` hashes the message internally
+    // (ECDSA-with-SHA256), so we hand it the JWS signing input directly
+    // rather than a pre-hash.
+    if verifier.verify(&signed_input, &signature).is_err() {
+        return Err(JwtError::InvalidSignature);
+    }
+
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .map_err(|_| JwtError::InvalidHeaderFormat)?;
+    serde_json::from_slice(&payload_bytes).map_err(|serde_err| {
+        tracing::error!(?serde_err);
+        JwtError::Serde
+    })
 }
