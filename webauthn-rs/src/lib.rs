@@ -381,6 +381,33 @@ impl<'a> WebauthnBuilder<'a> {
         self
     }
 
+    /// Append ML-DSA (FIPS 204) algorithms to the advertised `pubKeyCredParams`
+    /// list. Classical algorithms stay in their existing positions at the head
+    /// of the list; ML-DSA-44, -65, -87 are appended in ascending security-level
+    /// order so classical-first negotiation is preserved for authenticators
+    /// that do not implement PQC.
+    ///
+    /// civid feature 027 (<https://github.com/digital-go-jp/civid/issues/290>)
+    /// — ADR-008 Phase 1a. The underlying `ml-dsa` crate dependency is only
+    /// wired when `webauthn-rs-core` is compiled with the `ml-dsa` feature;
+    /// calling this method on a build without that feature still advertises
+    /// the algs on the wire but any actual ML-DSA assertion will fail to
+    /// verify (producing the same `COSEKeyInvalidType` error as any
+    /// unsupported algorithm). Relying parties MUST enable the feature
+    /// before flipping tenant opt-in.
+    ///
+    /// Opt-in by design — do NOT call this method for general-purpose
+    /// deployments until the ecosystem (FIDO MDS v3 coverage, audited
+    /// `ml-dsa` implementation, authenticators shipped) is ready.
+    pub fn allow_ml_dsa(mut self) -> Self {
+        for alg in COSEAlgorithm::pqc_algs() {
+            if !self.algorithms.contains(&alg) {
+                self.algorithms.push(alg);
+            }
+        }
+        self
+    }
+
     /// Complete the construction of the [Webauthn] instance. If an invalid configuration setting
     /// is found, an Error will be returned.
     ///

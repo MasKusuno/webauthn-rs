@@ -338,6 +338,44 @@ impl TryFrom<&serde_cbor_2::Value> for COSEKey {
             cose_key.validate()?;
             // return it
             Ok(cose_key)
+        } else if key_type == (COSEKeyTypeId::AKP as i128)
+            && matches!(
+                type_,
+                COSEAlgorithm::ML_DSA_44 | COSEAlgorithm::ML_DSA_65 | COSEAlgorithm::ML_DSA_87
+            )
+        {
+            // draft-ietf-cose-dilithium §5 — AKP key type for ML-DSA. Single
+            // public-key member at label -1 carrying raw FIPS 204 encoded bytes.
+            let param_set = match type_ {
+                COSEAlgorithm::ML_DSA_44 => MlDsaParamSet::MlDsa44,
+                COSEAlgorithm::ML_DSA_65 => MlDsaParamSet::MlDsa65,
+                COSEAlgorithm::ML_DSA_87 => MlDsaParamSet::MlDsa87,
+                _ => unreachable!(),
+            };
+
+            let pk_value = m
+                .get(&serde_cbor_2::Value::Integer(-1))
+                .ok_or(WebauthnError::COSEKeyInvalidCBORValue)?;
+            let pk_bytes = cbor_try_bytes!(pk_value)?;
+
+            if pk_bytes.len() != param_set.public_key_len() {
+                debug!(
+                    expected = param_set.public_key_len(),
+                    actual = pk_bytes.len(),
+                    "ML-DSA public key length mismatch"
+                );
+                return Err(WebauthnError::COSEKeyInvalidType);
+            }
+
+            let cose_key = COSEKey {
+                type_,
+                key: COSEKeyType::ML_DSA(COSEMlDsaKey {
+                    param_set,
+                    public_key: pk_bytes.to_vec(),
+                }),
+            };
+            cose_key.validate()?;
+            Ok(cose_key)
         } else {
             debug!(?key_type, ?type_, "WebauthnError::COSEKeyInvalidType");
             Err(WebauthnError::COSEKeyInvalidType)
@@ -425,7 +463,10 @@ impl TryFrom<(COSEAlgorithm, &Certificate)> for COSEKey {
             | COSEAlgorithm::PS512
             | COSEAlgorithm::EDDSA
             | COSEAlgorithm::PinUvProtocol
-            | COSEAlgorithm::INSECURE_RS1 => {
+            | COSEAlgorithm::INSECURE_RS1
+            | COSEAlgorithm::ML_DSA_44
+            | COSEAlgorithm::ML_DSA_65
+            | COSEAlgorithm::ML_DSA_87 => {
                 error!(
                     "unsupported X509 to COSE conversion for COSE algorithm type {:?}",
                     alg
@@ -468,6 +509,13 @@ impl COSEKey {
     }
 
     pub(crate) fn validate(&self) -> Result<(), WebauthnError> {
+        // ML-DSA validation is length-only at decode time; the actual
+        // public-key math is verified lazily inside the ml-dsa crate's
+        // `VerifyingKey::decode`. Skip the get_public_key round-trip which
+        // does not represent ML-DSA keys.
+        if matches!(&self.key, COSEKeyType::ML_DSA(_)) {
+            return Ok(());
+        }
         self.get_public_key().map(|_| ())
     }
 
@@ -519,6 +567,13 @@ impl COSEKey {
                 */
                 Err(WebauthnError::SshPublicKeyEDUnsupported)
             }
+            COSEKeyType::ML_DSA(_) => {
+                // ML-DSA is PQC and has no COSEKeyPublic representation.
+                // Callers that need to verify an ML-DSA signature must route
+                // through `verify_signature` which dispatches separately.
+                debug!("ML-DSA key has no public-key representation in COSEKeyPublic");
+                Err(WebauthnError::COSEKeyInvalidType)
+            }
         }
     }
 
@@ -528,6 +583,9 @@ impl COSEKey {
         signature: &[u8],
         verification_data: &[u8],
     ) -> Result<bool, WebauthnError> {
+        if let COSEKeyType::ML_DSA(ml_key) = &self.key {
+            return ml_dsa_verify_signature(ml_key, signature, verification_data);
+        }
         let public_key = self.get_public_key()?;
 
         match public_key {
@@ -563,6 +621,91 @@ impl COSEKey {
             }
         }
     }
+}
+
+/// Verify a WebAuthn assertion signature using an ML-DSA (FIPS 204) public key.
+///
+/// civid feature 027 PoC — dispatches to the RustCrypto `ml-dsa` crate. The
+/// signature is produced per draft-ietf-cose-dilithium: raw FIPS 204 sigma
+/// with empty context, covering `authenticatorData || SHA256(clientDataJSON)`
+/// (for assertion) or the attestation-specific message (for attestation).
+///
+/// REWRITE-ON-BUMP(ml-dsa>=0.1): watch for `VerifyingKey::decode` /
+/// `Signature::decode` / `verify_with_context` API renames when the crate
+/// bumps to 0.1.x. The `signature::Verifier::verify` trait call path is a
+/// more stable alternative; see lib.rs:626-632 in ml-dsa 0.0.4.
+#[cfg(feature = "ml-dsa")]
+fn ml_dsa_verify_signature(
+    cose_key: &COSEMlDsaKey,
+    signature: &[u8],
+    verification_data: &[u8],
+) -> Result<bool, WebauthnError> {
+    use ml_dsa::signature::Verifier;
+    use ml_dsa::{EncodedSignature, EncodedVerifyingKey};
+    use ml_dsa::{MlDsa44, MlDsa65, MlDsa87, Signature, VerifyingKey};
+
+    if signature.len() != cose_key.param_set.signature_len() {
+        debug!(
+            expected = cose_key.param_set.signature_len(),
+            actual = signature.len(),
+            "ML-DSA signature length mismatch"
+        );
+        return Ok(false);
+    }
+    if cose_key.public_key.len() != cose_key.param_set.public_key_len() {
+        debug!(
+            expected = cose_key.param_set.public_key_len(),
+            actual = cose_key.public_key.len(),
+            "ML-DSA public key length mismatch at verify time"
+        );
+        return Err(WebauthnError::COSEKeyInvalidType);
+    }
+
+    let ok = match cose_key.param_set {
+        MlDsaParamSet::MlDsa44 => {
+            let pk_enc = EncodedVerifyingKey::<MlDsa44>::try_from(cose_key.public_key.as_slice())
+                .map_err(|_| WebauthnError::COSEKeyInvalidType)?;
+            let sig_enc = EncodedSignature::<MlDsa44>::try_from(signature)
+                .map_err(|_| WebauthnError::COSEKeyInvalidType)?;
+            let vk = VerifyingKey::<MlDsa44>::decode(&pk_enc);
+            let sig = Signature::<MlDsa44>::decode(&sig_enc)
+                .ok_or(WebauthnError::COSEKeyInvalidType)?;
+            vk.verify(verification_data, &sig).is_ok()
+        }
+        MlDsaParamSet::MlDsa65 => {
+            let pk_enc = EncodedVerifyingKey::<MlDsa65>::try_from(cose_key.public_key.as_slice())
+                .map_err(|_| WebauthnError::COSEKeyInvalidType)?;
+            let sig_enc = EncodedSignature::<MlDsa65>::try_from(signature)
+                .map_err(|_| WebauthnError::COSEKeyInvalidType)?;
+            let vk = VerifyingKey::<MlDsa65>::decode(&pk_enc);
+            let sig = Signature::<MlDsa65>::decode(&sig_enc)
+                .ok_or(WebauthnError::COSEKeyInvalidType)?;
+            vk.verify(verification_data, &sig).is_ok()
+        }
+        MlDsaParamSet::MlDsa87 => {
+            let pk_enc = EncodedVerifyingKey::<MlDsa87>::try_from(cose_key.public_key.as_slice())
+                .map_err(|_| WebauthnError::COSEKeyInvalidType)?;
+            let sig_enc = EncodedSignature::<MlDsa87>::try_from(signature)
+                .map_err(|_| WebauthnError::COSEKeyInvalidType)?;
+            let vk = VerifyingKey::<MlDsa87>::decode(&pk_enc);
+            let sig = Signature::<MlDsa87>::decode(&sig_enc)
+                .ok_or(WebauthnError::COSEKeyInvalidType)?;
+            vk.verify(verification_data, &sig).is_ok()
+        }
+    };
+    Ok(ok)
+}
+
+/// Stub invoked when `ml-dsa` Cargo feature is off. Present so the dispatch
+/// in `COSEKey::verify_signature` compiles regardless of feature selection.
+#[cfg(not(feature = "ml-dsa"))]
+fn ml_dsa_verify_signature(
+    _cose_key: &COSEMlDsaKey,
+    _signature: &[u8],
+    _verification_data: &[u8],
+) -> Result<bool, WebauthnError> {
+    error!("ML-DSA verify attempted but `ml-dsa` Cargo feature is disabled");
+    Err(WebauthnError::COSEKeyInvalidType)
 }
 
 /// Compute the sha256 of a slice of data.

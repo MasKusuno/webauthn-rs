@@ -34,10 +34,23 @@ pub enum COSEAlgorithm {
     /// Identifies this as an INSECURE RS1 aka RSASSA-PKCS1-v1_5 using SHA-1. This is not
     /// used by validators, but can exist in some windows hello tpm's
     INSECURE_RS1 = -65535,
+    /// Identifies this key as ML-DSA-44 (FIPS 204). Permanent IANA COSE assignment.
+    /// Gated behind the `ml-dsa` feature of `webauthn-rs-core`.
+    /// REWRITE-ON-BUMP(cose-dilithium-rfc): RFC publication may shift surrounding
+    /// COSE key-type label values; alg integer itself is frozen.
+    ML_DSA_44 = -48,
+    /// Identifies this key as ML-DSA-65 (FIPS 204). Permanent IANA COSE assignment.
+    /// REWRITE-ON-BUMP(cose-dilithium-rfc): see ML_DSA_44.
+    ML_DSA_65 = -49,
+    /// Identifies this key as ML-DSA-87 (FIPS 204). Permanent IANA COSE assignment.
+    /// REWRITE-ON-BUMP(cose-dilithium-rfc): see ML_DSA_44.
+    ML_DSA_87 = -50,
     /// Identifies this key as the protocol used for [PIN/UV Auth Protocol One](https://fidoalliance.org/specs/fido-v2.1-ps-20210615/fido-client-to-authenticator-protocol-v2.1-ps-20210615.html#pinProto1)
     ///
     /// This reports as algorithm `-25`, but it is a lie. Don't include this in any algorithm lists.
-    PinUvProtocol,
+    /// Discriminant pinned to `-25` explicitly after the ML-DSA additions so
+    /// the implicit-next-value no longer collides with `ML_DSA_65 = -49`.
+    PinUvProtocol = -25,
 }
 
 impl COSEAlgorithm {
@@ -69,6 +82,21 @@ impl COSEAlgorithm {
             COSEAlgorithm::PS512,
             COSEAlgorithm::EDDSA,
             COSEAlgorithm::INSECURE_RS1,
+            COSEAlgorithm::ML_DSA_44,
+            COSEAlgorithm::ML_DSA_65,
+            COSEAlgorithm::ML_DSA_87,
+        ]
+    }
+
+    /// Post-quantum (ML-DSA / FIPS 204) algorithms. Advertised when an RP opts in;
+    /// off the default list because deploy readiness of the ecosystem is incomplete
+    /// (unaudited `ml-dsa` crate, no FIDO MDS v3 coverage for PQ AAGUIDs as of
+    /// 2026-04, no JOSE-PQC RFC). See civid ADR-008.
+    pub fn pqc_algs() -> Vec<Self> {
+        vec![
+            COSEAlgorithm::ML_DSA_44,
+            COSEAlgorithm::ML_DSA_65,
+            COSEAlgorithm::ML_DSA_87,
         ]
     }
 }
@@ -89,6 +117,9 @@ impl TryFrom<i128> for COSEAlgorithm {
             -39 => Ok(COSEAlgorithm::PS512),
             -8 => Ok(COSEAlgorithm::EDDSA),
             -65535 => Ok(COSEAlgorithm::INSECURE_RS1),
+            -48 => Ok(COSEAlgorithm::ML_DSA_44),
+            -49 => Ok(COSEAlgorithm::ML_DSA_65),
+            -50 => Ok(COSEAlgorithm::ML_DSA_87),
             _ => Err(()),
         }
     }

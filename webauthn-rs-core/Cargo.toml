@@ -15,6 +15,10 @@ repository = { workspace = true }
 
 [features]
 default = []
+# Enables post-quantum (ML-DSA-44 / -65 / -87) WebAuthn signature verification.
+# Added for civid feature 027 (https://github.com/digital-go-jp/civid/issues/290).
+# Off by default because the underlying ml-dsa crate is v0.0.x + unaudited.
+ml-dsa = ["dep:ml-dsa"]
 
 [package.metadata.docs.rs]
 rustdoc-args = ["--cfg", "docsrs"]
@@ -38,6 +42,7 @@ url = { workspace = true, features = ["serde"] }
 x509-parser = "0.16"
 der-parser = "9.0"
 uuid = { workspace = true, features = ["serde"] }
+ml-dsa = { workspace = true, optional = true }
 
 [dev-dependencies]
 hex-literal = "0.4"

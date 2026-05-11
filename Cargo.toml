@@ -116,6 +116,16 @@ url = "2"
 uuid = "^1.19.0"
 serde = { version = "^1.0.228", features = ["derive"] }
 serde_cbor_2 = { version = "0.13.0" }
+
+# Post-quantum signature verification (FIPS 204 / ML-DSA / Dilithium).
+# civid fork addition — see
+#   https://github.com/digital-go-jp/civid/issues/288 (ADR-008 PQC roadmap)
+#   https://github.com/digital-go-jp/civid/issues/290 (feature 027 PoC)
+# RustCrypto pure-Rust impl; v0.0.4 is unaudited per its README.
+# REWRITE-ON-BUMP(ml-dsa>=0.1): watch for VerifyingKey / Signature API renames
+# when the crate hits 0.1.x. Exact-version pin is intentional; bump requires
+# a follow-up PR touching every `REWRITE-ON-BUMP(ml-dsa>=0.1)` call site.
+ml-dsa = "=0.0.4"
 serde_json = "^1.0.145"
 serde_with = { version = "3.16.1", features = ["base64", "macros"] }
 rand = "0.9.2"

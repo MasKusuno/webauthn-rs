@@ -230,6 +230,53 @@ pub struct COSERSAKey {
     pub e: [u8; 3],
 }
 
+/// ML-DSA parameter set (FIPS 204). Maps 1:1 to the three IANA-assigned COSE
+/// algorithm integers (-48 / -49 / -50) and to the three unit types in the
+/// `ml-dsa` crate. Feature 027 PoC (civid issue #290).
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MlDsaParamSet {
+    /// ML-DSA-44 — NIST quantum security level 2, 1312-byte public key, 2420-byte signature.
+    MlDsa44,
+    /// ML-DSA-65 — NIST quantum security level 3, 1952-byte public key, 3309-byte signature.
+    MlDsa65,
+    /// ML-DSA-87 — NIST quantum security level 5, 2592-byte public key, 4627-byte signature.
+    MlDsa87,
+}
+
+impl MlDsaParamSet {
+    /// Return the public-key byte length for this parameter set.
+    pub fn public_key_len(&self) -> usize {
+        match self {
+            MlDsaParamSet::MlDsa44 => 1312,
+            MlDsaParamSet::MlDsa65 => 1952,
+            MlDsaParamSet::MlDsa87 => 2592,
+        }
+    }
+
+    /// Return the signature byte length for this parameter set.
+    pub fn signature_len(&self) -> usize {
+        match self {
+            MlDsaParamSet::MlDsa44 => 2420,
+            MlDsaParamSet::MlDsa65 => 3309,
+            MlDsaParamSet::MlDsa87 => 4627,
+        }
+    }
+}
+
+/// A COSE ML-DSA public key (FIPS 204). Encoded per draft-ietf-cose-dilithium
+/// AKP key type (kty = 7). Feature-gated behind the `ml-dsa` Cargo feature on
+/// `webauthn-rs-core`; the type is defined unconditionally so existing
+/// consumers get a COSEKeyType match-arm compile error when upgrading without
+/// the feature rather than a silent fallback.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct COSEMlDsaKey {
+    /// Which ML-DSA parameter set this key uses.
+    pub param_set: MlDsaParamSet,
+    /// The raw FIPS 204 public key bytes (length = `param_set.public_key_len()`).
+    pub public_key: Vec<u8>,
+}
+
 /// The type of Key contained within a COSE value. You should never need
 /// to alter or change this type.
 #[allow(non_camel_case_types)]
@@ -252,6 +299,10 @@ pub enum COSEKeyType {
     // EC_Reserved, // should always be invalid.
     /// Identifies this as an RSA key
     RSA(COSERSAKey),
+    /// Identifies this as an ML-DSA (FIPS 204) key. Feature-gated at the verify
+    /// call site behind `ml-dsa`; persisted here unconditionally so stored
+    /// credential blobs round-trip through serde without feature mismatch.
+    ML_DSA(COSEMlDsaKey),
 }
 
 /// The numeric if of the COSEKeyType used in the CBOR fields.
@@ -269,6 +320,14 @@ pub enum COSEKeyTypeId {
     EC_RSA = 3,
     /// Symmetric
     EC_Symmetric = 4,
+    /// HSS-LMS (stateful hash-based signatures).
+    HSS_LMS = 5,
+    /// WalnutDSA.
+    WalnutDSA = 6,
+    /// Algorithm Key Pair — catch-all kty for algorithms whose structure is
+    /// defined entirely by the `alg` field (ML-DSA, SLH-DSA, future PQC).
+    /// Added for civid feature 027 per draft-ietf-cose-dilithium §5.
+    AKP = 7,
 }
 
 /// A COSE Key as provided by the Authenticator. You should never need
