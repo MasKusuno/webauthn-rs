@@ -7,7 +7,7 @@ use crate::error::WebauthnError;
 use crate::internals::*;
 use crate::proto::*;
 use crypto_glue::{
-    traits::DecodeDer,
+    traits::{DecodeDer, EncodeDer},
     x509::{
         self, oiddb::rfc4519, BasicConstraints, ExtendedKeyUsage, ObjectIdentifier, SubjectAltName,
         X509Display,
@@ -441,6 +441,29 @@ pub(crate) fn verify_packed_attestation(
             // for every packed attestation regardless of trust-anchor config.
             for cert in &arr_x509 {
                 assert_cert_within_validity_window(cert)?;
+            }
+
+            // WebAuthn §8.2: attStmt.x5c is "attestnCert ∥ caCert ..." — the
+            // chain stops at an intermediate, NOT the trust root. A
+            // self-signed certificate in x5c is evidence of a malformed
+            // attestation (FIDO Conformance Tool Resp-5 F-10 probes exactly
+            // this). The trust root MUST come from a separately-configured
+            // attestation-CA store, not from the attester itself. Reject any
+            // cert whose issuer == subject (i.e. self-signed).
+            for cert in &arr_x509 {
+                let tbs = &cert.tbs_certificate;
+                let issuer_der = tbs
+                    .issuer
+                    .to_der()
+                    .map_err(|_| WebauthnError::AttestationStatementX5CInvalid)?;
+                let subject_der = tbs
+                    .subject
+                    .to_der()
+                    .map_err(|_| WebauthnError::AttestationStatementX5CInvalid)?;
+                if issuer_der == subject_der {
+                    trace!("packed x5c contains self-signed cert (WebAuthn §8.2 violation)");
+                    return Err(WebauthnError::AttestationStatementX5CInvalid);
+                }
             }
 
             // If attestnCert contains an extension with OID 1.3.6.1.4.1.45724.1.1.4
