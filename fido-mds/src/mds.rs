@@ -615,8 +615,17 @@ pub enum AttestationFormat {
 
 /// The output of authenticatorGetInfo. Some fields are hidden as they are duplicated
 /// in the metadata statement.
+///
+/// Forward-compat note (2026-Q2 onward): FIDO Alliance keeps adding optional
+/// fields to this map (2026-Q1 added 9 fields; 2026-Q2 added `defaultCredProtect`
+/// + others not yet enumerated upstream). The struct intentionally drops
+/// `deny_unknown_fields` and absorbs unrecognized keys into a flattened
+/// overflow map so that a fresh field on the live blob does not break MDS3
+/// JWS deserialise mid-cycle. civid never reads these fields — they are
+/// informational only — so the absorb path is the correct trade. The
+/// catalogued fields below stay typed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 pub struct AuthenticatorGetInfo {
     /// The list of supported CTAP versions
     pub versions: Vec<AuthenticatorVersion>,
@@ -705,6 +714,22 @@ pub struct AuthenticatorGetInfo {
     /// MDS payloads.
     #[serde(default)]
     pub uv_count_since_last_pin_entry: Option<u32>,
+    /// Default credProtect policy. Added by FIDO in 2026-Q2 MDS payloads.
+    /// Typed as opaque JSON because the live blob's encoding is still in
+    /// flux (some entries use the integer enum from CTAP 2.1, others use a
+    /// string spelling) — civid does not consult the value, so we accept
+    /// whatever the blob ships.
+    #[serde(default, rename = "defaultCredProtect")]
+    pub default_cred_protect: Option<serde_json::Value>,
+    /// Catch-all for any future authenticatorGetInfo field FIDO Alliance
+    /// adds without updating this struct. The values are inert — civid does
+    /// not consume them; they exist only so that MDS3 JWS deserialise does
+    /// not break the moment a new optional key appears on the wire. See the
+    /// 2026-Q1 field-add wave (9 new keys) and 2026-Q2 `defaultCredProtect`
+    /// for prior incidents that motivated this absorb path.
+    #[serde(flatten)]
+    #[doc(hidden)]
+    pub _overflow: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -734,7 +759,11 @@ pub struct MetadataStatement {
     #[serde(default)]
     pub alternative_descriptions: BTreeMap<String, String>,
 
-    /// A list of friendly names describing the device.
+    /// A list of friendly names describing the device. Optional in the live
+    /// 2026-Q2 MDS blob — earlier blob versions made this mandatory but the
+    /// current FIDO Alliance blob omits the field for several authenticators.
+    /// Default to an empty map so deserialise does not fail mid-cycle.
+    #[serde(default)]
     pub friendly_names: BTreeMap<String, String>,
 
     /// Earliest (i.e. lowest) trustworthy authenticatorVersion meeting the requirements specified
