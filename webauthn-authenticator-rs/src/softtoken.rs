@@ -931,7 +931,7 @@ mod tests {
         // But server side should reject it, because it doesn't allow subdomains.
         assert!(matches!(
             wan.authenticate_credential(&r, &auth_state),
-            Err(WebauthnError::InvalidRPOrigin)
+            Err(webauthn_rs_core::error::WebauthnError::InvalidRPOrigin)
         ));
         info!("auth_res -> {:x?}", auth_res);
 

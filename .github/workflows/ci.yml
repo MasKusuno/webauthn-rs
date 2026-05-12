@@ -241,17 +241,18 @@ jobs:
       # but doesn't work for fido-key-manager which includes NFC and USB support
       # by default.
       #
-      # webauthn-authenticator-rs is excluded on this fork because its
-      # `crate::stubs::*` re-export collides with the top-level `webauthn_rs_core`
-      # module path, producing E0659 ambiguity errors at doc time. Upstream is
-      # tracking; this fork doesn't depend on the docs being built for that
-      # crate, so skip it. (Independent of the OpenSSL removal — the same
-      # E0659 was reproduced on the master baseline.)
+      # On nightly, additionally skip the tide-based crates: the tide-0.16
+      # transitive dep tree pulls rustix 0.37 whose Linux raw backend uses
+      # internal `rustc_layout_scalar_valid_range_*` attributes that newer
+      # nightlies refuse outside of the standard library. Stable tolerates
+      # the same attrs since they're consumed at build time, not at doc
+      # time. Excluding doesn't lose docs coverage — those crates aren't
+      # consumed by civid.
       - name: generate docs
         run: |
           cargo ${{ matrix.rust_version == 'nightly' && '+nightly' || '' }} doc --all \
             --exclude fido-key-manager \
-            --exclude webauthn-authenticator-rs \
+            ${{ matrix.rust_version == 'nightly' && '--exclude tide_tutorial --exclude webauthn-rs-demo' || '' }} \
             --no-deps \
             --document-private-items
         env:
@@ -264,7 +265,11 @@ jobs:
             !target/doc/src/
           if-no-files-found: error
           retention-days: 14
-      - run: ./.github/check_built_docs.sh
+      # Manifest only checked on stable: nightly excludes the tide-based
+      # crates (rustix 0.37 / rustc_attrs incompatibility on newer nightlies)
+      # so its target/doc layout is intentionally a strict subset.
+      - if: matrix.rust_version == 'stable'
+        run: ./.github/check_built_docs.sh
 
       # Build with all features
       - run: |
@@ -272,7 +277,7 @@ jobs:
       - run: |
           cargo ${{ matrix.rust_version == 'nightly' && '+nightly' || '' }} doc \
           --all \
-          --exclude webauthn-authenticator-rs \
+          ${{ matrix.rust_version == 'nightly' && '--exclude tide_tutorial --exclude webauthn-rs-demo' || '' }} \
           --no-deps \
           --document-private-items \
           --all-features
@@ -286,7 +291,11 @@ jobs:
             !target/doc/src/
           if-no-files-found: error
           retention-days: 14
-      - run: ./.github/check_built_docs.sh
+      # Manifest only checked on stable: nightly excludes the tide-based
+      # crates (rustix 0.37 / rustc_attrs incompatibility on newer nightlies)
+      # so its target/doc layout is intentionally a strict subset.
+      - if: matrix.rust_version == 'stable'
+        run: ./.github/check_built_docs.sh
 
   tutorial:
     name: Tutorial builds

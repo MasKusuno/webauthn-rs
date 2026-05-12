@@ -3695,8 +3695,7 @@ mod tests {
         // openssl-base end-to-end success.
         assert!(
             matches!(result, Err(WebauthnError::AttestationStatementSigInvalid)),
-            "expected AttestationStatementSigInvalid, got {:?}",
-            result,
+            "expected AttestationStatementSigInvalid, got {result:?}",
         );
     }
 

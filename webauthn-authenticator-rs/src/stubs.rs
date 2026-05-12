@@ -202,13 +202,11 @@ pub mod openssl {
     }
 }
 
-#[cfg(not(feature = "crypto"))]
-pub mod webauthn_rs_core {
-    pub mod proto {
-        pub struct COSEEC2Key {}
-        pub struct COSEKey {}
-        pub enum COSEKeyType {}
-        pub enum COSEKeyTypeId {}
-        pub enum ECDSACurve {}
-    }
-}
+// `webauthn_rs_core` is now an unconditional dependency of this crate (see
+// upstream `f52f315` "Fix optional dep" — the `crypto` Cargo feature no
+// longer gates the dep, only re-exports). The stub module that used to live
+// here under `#[cfg(not(feature = "crypto"))]` would still get compiled at
+// docs-time and shadow the real crate, producing E0659 ambiguity errors at
+// every `use webauthn_rs_core::...` site (`use crate::stubs::*;` brings
+// both the real and stubbed `webauthn_rs_core` into scope). Drop the stub
+// entirely — the real crate is always present.
