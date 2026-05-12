@@ -4,7 +4,7 @@
 
 use crate::crypto::{
     compute_sha256, compute_sha384, compute_sha512, only_hash_from_type, verify_signature,
-    TpmSanData,
+    verify_tpm_signature, TpmSanData,
 };
 use crate::error::WebauthnError;
 use crate::internals::*;
@@ -1025,9 +1025,9 @@ pub(crate) fn verify_tpm_attestation(
 
     let sig_valid = match sig {
         TpmtSignature::RawSignature(dsig) => {
-            // Alg was pre-loaded into the x509 struct during parsing
-            // so we should just be able to verify
-            verify_signature(aik_cert, &dsig, certinfo_bytes)?
+            // TPM raw r||s ECDSA / PKCS#1 v1.5 RSA shapes — see
+            // verify_tpm_signature for the dispatch rationale.
+            verify_tpm_signature(alg, aik_cert, &dsig, certinfo_bytes)?
         }
     };
 
@@ -1064,11 +1064,13 @@ pub(crate) fn assert_tpm_attest_req(x509: &x509::Certificate) -> Result<(), Weba
 
     // Version MUST be set to 3.
     if x509_cert.version != x509::Version::V3 {
+        warn!(version = ?x509_cert.version, "TPM AIK cert version != V3");
         return Err(WebauthnError::AttestationCertificateRequirementsNotMet);
     }
 
     // Subject field MUST be set to empty.
     if !x509_cert.subject.is_empty() {
+        warn!(subject = ?x509_cert.subject, "TPM AIK cert subject must be empty");
         return Err(WebauthnError::AttestationCertificateRequirementsNotMet);
     }
 
@@ -1087,36 +1089,73 @@ pub(crate) fn assert_tpm_attest_req(x509: &x509::Certificate) -> Result<(), Weba
     // structure.
     let subject_alt_name = x509_cert
         .get::<SubjectAltName>()
-        .map_err(|_| WebauthnError::AttestationCertificateRequirementsNotMet)?
+        .map_err(|err| {
+            warn!(?err, "TPM AIK cert: SubjectAltName extension parse failed");
+            WebauthnError::AttestationCertificateRequirementsNotMet
+        })?
         .and_then(|(critical, extn)| critical.then_some(extn))
-        .ok_or(WebauthnError::AttestationCertificateRequirementsNotMet)?;
+        .ok_or_else(|| {
+            warn!("TPM AIK cert: SubjectAltName must be present and critical");
+            WebauthnError::AttestationCertificateRequirementsNotMet
+        })?;
 
-    let _tpm_san_data = TpmSanData::try_from(&subject_alt_name)
-        .and_then(|san_data| {
-            tpm_device_attribute_parser(san_data.manufacturer.as_bytes())
-                .map_err(|_| WebauthnError::ParseNOMFailure)
-        })
-        .and_then(|(_, manufacturer_bytes)| TpmVendor::try_from(manufacturer_bytes))?;
+    let san_data = TpmSanData::try_from(&subject_alt_name).map_err(|err| {
+        warn!(?err, ?subject_alt_name, "TPM AIK cert: TpmSanData parse failed (manufacturer/model/version missing or malformed)");
+        err
+    })?;
+    let manufacturer = san_data.manufacturer;
+    let (_, manufacturer_bytes) = tpm_device_attribute_parser(manufacturer.as_bytes())
+        .map_err(|err| {
+            warn!(manufacturer, ?err, "TPM AIK cert: manufacturer device-attribute parse failed");
+            WebauthnError::ParseNOMFailure
+        })?;
+    let _vendor = TpmVendor::try_from(manufacturer_bytes).map_err(|err| {
+        warn!(manufacturer_bytes = ?std::str::from_utf8(manufacturer_bytes), ?err, "TPM AIK cert: vendor not in allow-list (need fido-conformance-testing feature?)");
+        err
+    })?;
 
-    // The Extended Key Usage extension MUST contain the "joint-iso-itu-t(2) internationalorganizations(23) 133 tcg-kp(8) tcg-kp-AIKCertificate(3)" OID.
+    // The Extended Key Usage extension MUST contain the "joint-iso-itu-t(2)
+    // internationalorganizations(23) 133 tcg-kp(8) tcg-kp-AIKCertificate(3)" OID.
+    //
+    // WebAuthn L3 §8.3.1 step 5 requires the OID be present in the EKU but
+    // does NOT require the EKU to be critical. The FIDO2 Server Conformance
+    // Tool's TPM fixtures (tpmAIK.js, tpmECC.js) emit EKU as non-critical,
+    // which is spec-valid and explicitly accepted here. Real TPM vendor AIKs
+    // also vary on this — Infineon and Microsoft TPM AIKs we've observed
+    // emit non-critical EKU as well. The previous critical-only filter was
+    // strictly tighter than the WebAuthn spec.
     let extended_key_usage = x509_cert
         .get::<ExtendedKeyUsage>()
-        .map_err(|_| WebauthnError::AttestationCertificateRequirementsNotMet)?
-        .and_then(|(critical, extn)| critical.then_some(extn))
-        .ok_or(WebauthnError::AttestationCertificateRequirementsNotMet)?;
+        .map_err(|err| {
+            warn!(?err, "TPM AIK cert: ExtendedKeyUsage parse failed");
+            WebauthnError::AttestationCertificateRequirementsNotMet
+        })?
+        .map(|(_critical, extn)| extn)
+        .ok_or_else(|| {
+            warn!("TPM AIK cert: ExtendedKeyUsage extension missing");
+            WebauthnError::AttestationCertificateRequirementsNotMet
+        })?;
 
     if !extended_key_usage.0.contains(&OID_JOINT_ISO_ITU_T) {
+        warn!(eku = ?extended_key_usage.0, "TPM AIK cert: EKU missing tcg-kp-AIKCertificate OID");
         return Err(WebauthnError::AttestationCertificateRequirementsNotMet);
     }
 
     // The Basic Constraints extension MUST have the CA component set to false.
     let basic_constraints = x509_cert
         .get::<BasicConstraints>()
-        .map_err(|_| WebauthnError::AttestationCertificateRequirementsNotMet)?
+        .map_err(|err| {
+            warn!(?err, "TPM AIK cert: BasicConstraints parse failed");
+            WebauthnError::AttestationCertificateRequirementsNotMet
+        })?
         .and_then(|(critical, extn)| critical.then_some(extn))
-        .ok_or(WebauthnError::AttestationCertificateRequirementsNotMet)?;
+        .ok_or_else(|| {
+            warn!("TPM AIK cert: BasicConstraints must be present and critical");
+            WebauthnError::AttestationCertificateRequirementsNotMet
+        })?;
 
     if basic_constraints.ca {
+        warn!("TPM AIK cert: BasicConstraints.ca must be false");
         return Err(WebauthnError::AttestationCertificateRequirementsNotMet);
     }
 

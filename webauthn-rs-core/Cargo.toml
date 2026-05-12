@@ -49,6 +49,8 @@ x509-parser = "0.16"
 der-parser = "9.0"
 uuid = { workspace = true, features = ["serde"] }
 ml-dsa = { workspace = true, optional = true }
+# Ed25519 / EdDSA verifier — see workspace Cargo.toml comment.
+ed25519-dalek = { workspace = true }
 
 [dev-dependencies]
 hex-literal = "0.4"

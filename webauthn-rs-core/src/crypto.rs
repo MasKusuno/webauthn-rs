@@ -27,6 +27,10 @@ use crypto_glue::{
     traits::{Digest, OwnedToRef, Verifier},
     x509::{self, Certificate, GeneralName, ObjectIdentifier, OtherName, SubjectAltName},
 };
+// Ed25519 verifier — see workspace Cargo.toml comment on ed25519-dalek.
+// crypto-glue 0.1.16 does not surface an Ed25519 verifier so the fork
+// pulls ed25519-dalek directly. Verify-only — no signing surface.
+use ed25519_dalek::{Signature as Ed25519Signature, VerifyingKey as Ed25519VerifyingKey};
 
 /// Validate an x509 signature is valid for the supplied data
 pub fn verify_signature(
@@ -41,6 +45,121 @@ pub fn verify_signature(
         .is_ok();
 
     Ok(valid)
+}
+
+/// Verify a TPM attestation signature (`TpmtSignature::RawSignature`) over
+/// `verification_data` using the AIK cert's public key.
+///
+/// TPM signatures differ from the X.509-signature shape `verify_signature`
+/// expects in two ways that matter for the FIDO2 Server conformance Tool's
+/// Resp-9 fixtures:
+///
+///   1. **Raw, not DER.** Per TPMv2-Part2 §11.3.4, the signature inside
+///      `TPMT_SIGNATURE` is the raw `r || s` octet pair (ECDSA) or the
+///      raw PKCS#1 v1.5 octet string (RSA). `crypto_glue::x509::x509_verify_signature`
+///      expects DER-encoded ECDSA signatures and does not match the
+///      `RSA_ENCRYPTION` SPKI OID at all (it only routes
+///      `SHA_256_WITH_RSA_ENCRYPTION`, which is a *signature* OID, not an
+///      SPKI OID — this is a separate upstream bug worth filing).
+///   2. **Hash dispatch comes from `alg`.** The AIK cert's SPKI alg is
+///      generic (`rsaEncryption` / `id-ecPublicKey`); the COSE `alg` from
+///      `attStmt.alg` tells us which digest to apply.
+///
+/// Implementation:
+///   * `alg = ES256` (-7) → P-256 curve, SHA-256 internal, raw 64-byte sig
+///   * `alg = ES384` (-35) → P-384 curve, SHA-384 internal, raw 96-byte sig
+///   * `alg = RS256` (-257) → RSA-PKCS1 v1.5 + SHA-256
+///   * `alg = INSECURE_RS1` (-65535) → RSA-PKCS1 v1.5 + SHA-1 (verifier
+///     capability; consumer policy gates whether to enrol)
+///
+/// The conformance adapter's RS1-acceptance posture (see
+/// `posture-rs1-insecure-sha1` in civid spec 013) keeps Resp-9 P-2 green
+/// without dragging SHA-1 into production policy.
+pub fn verify_tpm_signature(
+    alg: COSEAlgorithm,
+    certificate: &Certificate,
+    signature: &[u8],
+    verification_data: &[u8],
+) -> Result<bool, WebauthnError> {
+    use crypto_glue::traits::{EncodeDer, SpkiDecodePublicKey};
+
+    let spki = &certificate.tbs_certificate.subject_public_key_info;
+    let spki_der = spki
+        .to_der()
+        .map_err(|err| {
+            error!(?err, "TPM: serialise SPKI to DER");
+            WebauthnError::X509DerInvalid
+        })?;
+
+    match alg {
+        COSEAlgorithm::ES256 => {
+            let verifier = EcdsaP256VerifyingKey::from_public_key_der(&spki_der)
+                .map_err(|err| {
+                    error!(?err, "TPM: AIK SPKI is not P-256 ECDSA");
+                    WebauthnError::EcdsaPointInvalid
+                })?;
+            // P-256 signatures are 32+32 = 64 bytes raw r||s.
+            let signature = EcdsaP256Signature::from_slice(signature)
+                .map_err(|err| {
+                    error!(?err, "TPM: ES256 raw signature length");
+                    WebauthnError::SignatureInvalid
+                })?;
+            Ok(verifier.verify(verification_data, &signature).is_ok())
+        }
+        COSEAlgorithm::ES384 => {
+            let verifier = EcdsaP384VerifyingKey::from_public_key_der(&spki_der)
+                .map_err(|err| {
+                    error!(?err, "TPM: AIK SPKI is not P-384 ECDSA");
+                    WebauthnError::EcdsaPointInvalid
+                })?;
+            // P-384 signatures are 48+48 = 96 bytes raw r||s.
+            let signature = EcdsaP384Signature::from_slice(signature)
+                .map_err(|err| {
+                    error!(?err, "TPM: ES384 raw signature length");
+                    WebauthnError::SignatureInvalid
+                })?;
+            Ok(verifier.verify(verification_data, &signature).is_ok())
+        }
+        COSEAlgorithm::RS256 => {
+            let verifier = RS256PublicKey::from_public_key_der(&spki_der).map_err(|err| {
+                error!(?err, "TPM: AIK SPKI is not RSA");
+                WebauthnError::RsaParametersInvalid
+            })?;
+            let verifier = RS256VerifyingKey::new(verifier);
+            let signature = RS256Signature::try_from(signature).map_err(|err| {
+                error!(?err, "TPM: RS256 signature length");
+                WebauthnError::SignatureInvalid
+            })?;
+            Ok(verifier.verify(verification_data, &signature).is_ok())
+        }
+        COSEAlgorithm::INSECURE_RS1 => {
+            use crypto_glue::rsa::pkcs1v15::Pkcs1v15Sign;
+            use crypto_glue::sha1::Sha1;
+            // PKCS#1 v1.5 DigestInfo prefix for SHA-1 (constant from RFC
+            // 8017 §9.2). Same constant verify_signature uses for the
+            // RsaS256+INSECURE_RS1 path on the assertion side.
+            const SHA1_DIGEST_INFO_PREFIX: [u8; 15] = [
+                0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00,
+                0x04, 0x14,
+            ];
+            let pub_key = RS256PublicKey::from_public_key_der(&spki_der).map_err(|err| {
+                error!(?err, "TPM: AIK SPKI is not RSA");
+                WebauthnError::RsaParametersInvalid
+            })?;
+            let scheme = Pkcs1v15Sign {
+                hash_len: Some(20),
+                prefix: Box::from(&SHA1_DIGEST_INFO_PREFIX[..]),
+            };
+            let mut hasher = Sha1::new();
+            hasher.update(verification_data);
+            let hashed = hasher.finalize();
+            Ok(pub_key.verify(scheme, &hashed, signature).is_ok())
+        }
+        other => {
+            error!(?other, "TPM verify: unsupported alg");
+            Err(WebauthnError::COSEKeyInvalidAlgorithm)
+        }
+    }
 }
 
 pub(crate) struct TpmSanData<'a> {
@@ -104,6 +223,23 @@ impl<'a> TryFrom<&'a SubjectAltName> for TpmSanData<'a> {
     type Error = WebauthnError;
 
     fn try_from(x509_name: &'a SubjectAltName) -> Result<Self, Self::Error> {
+        // Per TCG EK Profile §3.2.9 / TPM AIK §8.3.1, the manufacturer /
+        // model / firmware-version attributes can appear in the SAN under
+        // either of two GeneralName encodings:
+        //
+        //   * `OtherName` — `[0] OtherName { type-id = OID, value = ANY }`,
+        //     each OID/value pair as its own GeneralName entry. Real TPM
+        //     vendor AIKs we tested here historically use this form.
+        //   * `DirectoryName` — `[4] Name`, an RdnSequence carrying the
+        //     same attributes via `AttributeTypeAndValue { oid, value }`.
+        //     The FIDO2 Server Conformance Tool's `tpmAIK.js` /
+        //     `tpmECC.js` fixtures emit this form.
+        //
+        // Both encodings are spec-valid (TCG EK Profile lists both). The
+        // upstream parser only handled `OtherName`, which silently failed
+        // every TPM AIK with a `DirectoryName`-style SAN — including the
+        // FIDO2 Server Conformance Tool's Resp-9 P-1 / P-2 fixtures.
+        // Walk both forms.
         x509_name
             .0
             .iter()
@@ -122,6 +258,31 @@ impl<'a> TryFrom<&'a SubjectAltName> for TpmSanData<'a> {
                         } else {
                             builder
                         }
+                    }
+                    GeneralName::DirectoryName(rdn_seq) => {
+                        // RdnSequence ::= SEQUENCE OF RelativeDistinguishedName
+                        // RelativeDistinguishedName ::= SET SIZE(1..MAX) OF AttributeTypeAndValue
+                        // We accept both flat shapes (one AVA per RDN, FIDO Tool
+                        // emits this) and clustered shapes (multiple AVAs in
+                        // one RDN, also spec-valid).
+                        rdn_seq.0.iter().try_fold(builder, |inner_builder, rdn| {
+                            rdn.0.iter().try_fold(inner_builder, |b, ava| {
+                                let oid = &ava.oid;
+                                let bytes = ava.value.value();
+                                let attr_value = str::from_utf8(bytes)?;
+                                Ok::<_, std::str::Utf8Error>(
+                                    if *oid == TCG_AT_TPM_MANUFACTURER_RAW {
+                                        b.manufacturer(attr_value)
+                                    } else if *oid == TCG_AT_TPM_MODEL_RAW {
+                                        b.model(attr_value)
+                                    } else if *oid == TCG_AT_TPM_VERSION_RAW {
+                                        b.version(attr_value)
+                                    } else {
+                                        b
+                                    },
+                                )
+                            })
+                        })?
                     }
                     _ => builder,
                 };
@@ -531,7 +692,7 @@ enum COSEKeyPublic {
     EcdsaP384(EcdsaP384PublicKey),
     EcdsaP521(EcdsaP521PublicKey),
     RsaS256(RS256PublicKey),
-    // Ed25519(),
+    Ed25519(Ed25519VerifyingKey),
     // Ed448(),
 }
 
@@ -594,25 +755,29 @@ impl COSEKey {
                     .map(COSEKeyPublic::RsaS256)
                     .map_err(|_err| WebauthnError::RsaParametersInvalid)
             }
-            COSEKeyType::EC_OKP(_edk) => {
-                // !!!
-                // Today, RustCrypto doesn't directly support ed25519 or ed448. As a result
-                // I'm opting to skip these.
-                //
-                // We don't actually *advertise* support for either of these directly in our
-                // default algorithm offerings, so the impact of this should be minimal.
-                /*
+            COSEKeyType::EC_OKP(edk) => {
+                // EdDSA verifying-key construction. ed25519-dalek's
+                // VerifyingKey::from_bytes takes the 32-byte compressed
+                // public key per RFC 8032 §5.1.3, which is exactly what
+                // CTAP packs into `x` for the OKP key. Ed448 stays
+                // unsupported (no audited pure-Rust Ed448 verifier as of
+                // 2026-Q2; not advertised by civid's production listener).
                 match &edk.curve {
                     EDDSACurve::ED25519 => {
-
+                        let xref: &[u8] = edk.x.as_ref();
+                        let bytes: [u8; 32] = xref.try_into().map_err(|_err| {
+                            error!(len = xref.len(), "Ed25519 x is not 32 bytes");
+                            WebauthnError::COSEKeyEDDSAXInvalid
+                        })?;
+                        Ed25519VerifyingKey::from_bytes(&bytes)
+                            .map(COSEKeyPublic::Ed25519)
+                            .map_err(|err| {
+                                error!(?err, "Ed25519 VerifyingKey::from_bytes");
+                                WebauthnError::COSEKeyEDDSAXInvalid
+                            })
                     }
-                    EDDSACurve::ED448 => {
-                    }
+                    EDDSACurve::ED448 => Err(WebauthnError::SshPublicKeyEDUnsupported),
                 }
-
-                let xref = edk.x.as_ref();
-                */
-                Err(WebauthnError::SshPublicKeyEDUnsupported)
             }
             COSEKeyType::ML_DSA(_) => {
                 // ML-DSA is PQC and has no COSEKeyPublic representation.
@@ -693,6 +858,15 @@ impl COSEKey {
                 let signature = RS256Signature::try_from(signature)
                     .map_err(|_err| WebauthnError::SignatureInvalid)?;
                 let verifier = RS256VerifyingKey::new(pub_key);
+                Ok(verifier.verify(verification_data, &signature).is_ok())
+            }
+            COSEKeyPublic::Ed25519(verifier) => {
+                // RFC 8032 §5.1.6 / WebAuthn §6.5.6: EdDSA signatures are a
+                // fixed 64-byte octet string (32-byte R || 32-byte S),
+                // verified directly over `verification_data` (the message,
+                // not a digest — Ed25519 hashes internally via SHA-512).
+                let signature = Ed25519Signature::from_slice(signature)
+                    .map_err(|_err| WebauthnError::SignatureInvalid)?;
                 Ok(verifier.verify(verification_data, &signature).is_ok())
             }
         }

@@ -2401,20 +2401,28 @@ mod tests {
         // Verifier-layer SHA-1 capability no longer flags this as
         // `CredentialInsecureCryptography` — the policy is now expressed
         // at the consumer by omitting `INSECURE_RS1` from
-        // `credential_algorithms`. Under the 6.0 / crypto-glue base, the
-        // chain trust step fails because crypto-glue's `x509_verify_signature`
-        // only handles ES256/ES384/RS256 SPKIs; the Microsoft TPM Root CA
-        // 2014 cert is signed under sha256WithRSAEncryption but the leaf
-        // ECC cert chain decoding fails first, producing a
-        // `SignatureAlgorithmNotImplemented` lower down. Refresh both
-        // crypto-glue (to add the missing OID branches) and the bundled
-        // Microsoft TPM root (which has expired in real time) to exercise
-        // successful TPM RS1 verification. Leave the assertion at "any
-        // chain-trust error" until then.
+        // `credential_algorithms`.
+        //
+        // The fork's `verify_tpm_signature` now accepts the AIK signature
+        // (RSA-PKCS1 v1.5 + SHA-1), so the run reaches `assert_tpm_attest_req`
+        // which then rejects on the TPM-vendor allowlist (the captured
+        // fixture's manufacturer string is "Microsoft Corporation", which
+        // is not registered in the production vendor allow-list — that is
+        // a separate axis from the trust chain). Without the
+        // `fido-conformance-testing` cargo feature the vendor stays out,
+        // surfacing as `AttestationCertificateRequirementsNotMet`.
+        //
+        // The Microsoft TPM Root CA 2014 cert in the fixture has also
+        // expired in real time, so chain validation (when reached via
+        // `AttestationCaList`) returns `AttestationChainNotTrusted`. To
+        // get this fixture all the way to a green test we would need (a)
+        // a refreshed Microsoft TPM root and (b) the conformance vendor
+        // feature on. Until both, accept any of the three terminal errors.
         assert!(matches!(
             result,
             Err(WebauthnError::AttestationChainNotTrusted(_))
                 | Err(WebauthnError::AttestationStatementSigInvalid)
+                | Err(WebauthnError::AttestationCertificateRequirementsNotMet)
         ))
     }
 
@@ -3190,10 +3198,9 @@ mod tests {
             SystemTime::now(),
         );
 
-        // temporarily disabled due to ed25519 support being absent.
+        // ed25519 support is wired via ed25519-dalek (fork addition).
         debug!("{:?}", result);
-        // assert!(result.is_ok());
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -3236,10 +3243,9 @@ mod tests {
             SystemTime::now(),
         );
 
-        // temporarily disabled due to ed25519 support being absent.
+        // ed25519 support is wired via ed25519-dalek (fork addition).
         debug!("{:?}", result);
-        // assert!(result.is_ok());
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 
     // ⚠️  Currently IGNORED as it appears that pixel 3a send INVALID attestation requests.
@@ -3684,18 +3690,15 @@ mod tests {
         // capability and policy delegated to `credential_algorithms` /
         // `secure_algs()`, the verifier no longer bails out early.
         //
-        // Under the 6.0 / crypto-glue base, the x509-layer
-        // `verify_signature` only implements ES256/ES384/RS256 SPKIs, so
-        // the TPM aikCertificate signed under rsaEncryption (OID
-        // 1.2.840.113549.1.1.1) hits `SignatureAlgorithmNotImplemented`
-        // inside crypto-glue and surfaces as `AttestationStatementSigInvalid`.
-        // Once crypto-glue grows the missing branches, this fixture will
-        // run end-to-end and start returning Ok; until then this assertion
-        // pins the current observed behaviour rather than the original
-        // openssl-base end-to-end success.
+        // The fork's `verify_tpm_signature` accepts the AIK signature
+        // (RSA-PKCS1 v1.5 + SHA-1). The DirectoryName-form SAN parser
+        // and the relaxed (non-critical-allowed) EKU check then let
+        // `assert_tpm_attest_req` pass — the fixture's manufacturer
+        // (Microsoft NPCT75x) IS in the TPM vendor allow-list, so this
+        // fixture now runs end-to-end and returns Ok. Pin that.
         assert!(
-            matches!(result, Err(WebauthnError::AttestationStatementSigInvalid)),
-            "expected AttestationStatementSigInvalid, got {result:?}",
+            result.is_ok(),
+            "expected Ok end-to-end TPM verification, got {result:?}",
         );
     }
 
