@@ -1,3 +1,22 @@
+Webauthn-rs (MasKusuno fork — `ml-dsa-verify` legacy 0.5.x branch)
+==================================================================
+
+> **⚠️ Maintenance mode.**
+>
+> This branch is the legacy 0.5.x line of the
+> [MasKusuno/webauthn-rs](https://github.com/MasKusuno/webauthn-rs) fork.
+> It still depends on OpenSSL.
+>
+> **The default branch is now [`ml-dsa-verify-6.0`](https://github.com/MasKusuno/webauthn-rs/tree/ml-dsa-verify-6.0)**,
+> which is rebased onto upstream's 6.0 / `crypto-glue` line and removes the
+> OpenSSL dependency. New work — including any further ML-DSA, MDS, and
+> attestation fixes — lands on `ml-dsa-verify-6.0` only.
+>
+> Use this branch only if you are pinned to webauthn-rs 0.5.x and want the
+> ML-DSA-44 / -65 / -87 verify path. Otherwise prefer `ml-dsa-verify-6.0`.
+
+---
+
 Webauthn-rs
 ==========
 
