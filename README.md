@@ -1,3 +1,47 @@
+Webauthn-rs (MasKusuno fork)
+============================
+
+This is a fork of [kanidm/webauthn-rs](https://github.com/kanidm/webauthn-rs)
+maintained for the [digital-go-jp/civid](https://github.com/digital-go-jp/civid)
+project. It carries the following additions on top of upstream:
+
+- **Pure-Rust crypto**: rebased onto upstream's `6.0-dev-drop-openssl` base, so
+  there is no OpenSSL / `openssl-sys` dependency anywhere in the tree.
+  Cryptographic primitives come from
+  [`crypto-glue`](https://crates.io/crates/crypto-glue) (RustCrypto stack).
+- **Post-quantum (ML-DSA) verify**: ML-DSA-44 / -65 / -87 (FIPS 204) signature
+  verification, opt-in via the `ml-dsa` Cargo feature on `webauthn-rs-core`
+  and `WebauthnBuilder::allow_ml_dsa()` on the high-level facade. Backed by
+  the RustCrypto [`ml-dsa`](https://crates.io/crates/ml-dsa) crate (currently
+  unaudited; off by default).
+- **FIDO MDS hardening**: alg-aware JWS dispatch (RS256 / ES256), optional
+  CRL consultation (`from_str_with_trust_roots_and_crls`), tolerant parsing
+  of status reports without `authenticatorVersion`, 2026-Q1 / 2026-Q2 schema
+  additions, dev-mode `from_str_with_trust_roots` for the FIDO Conformance
+  Tool's `mds3.fido.tools` endpoint.
+- **WebAuthn attestation hardening**: rejection of expired/not-yet-valid
+  packed attestation certs, leftover bytes after `authenticatorData`,
+  self-signed certs in `attStmt.x5c`. TPM `pubArea` `nameAlg` accepts
+  SHA-{256,384,512} (rejects SHA-1).
+- **RS1 as verifier capability, not policy**: `INSECURE_RS1` is verifiable
+  at the cryptographic layer; whether to enrol RS1 credentials is delegated
+  to the consumer's `secure_algs()` policy.
+- **FIDO Conformance Tool support**: opt-in `fido-conformance-testing` Cargo
+  feature on `webauthn-rs-core` accepts the synthetic `FFFFF1D0` TPM vendor
+  the tool's fixtures emit. **Production builds MUST NOT enable this**.
+
+### Branches
+
+- **`ml-dsa-verify-6.0`** — default branch; the 6.0-based, OpenSSL-free line
+  described above. New work happens here.
+- **`ml-dsa-verify`** — legacy 0.5.x-based PQC branch. Retained for
+  consumers pinned to webauthn-rs 0.5.x who want ML-DSA support. In
+  maintenance mode; new fixes land on `ml-dsa-verify-6.0` only.
+
+For the upstream project description, see below.
+
+---
+
 Webauthn-rs
 ==========
 
