@@ -84,40 +84,36 @@ pub fn verify_tpm_signature(
     use crypto_glue::traits::{EncodeDer, SpkiDecodePublicKey};
 
     let spki = &certificate.tbs_certificate.subject_public_key_info;
-    let spki_der = spki
-        .to_der()
-        .map_err(|err| {
-            error!(?err, "TPM: serialise SPKI to DER");
-            WebauthnError::X509DerInvalid
-        })?;
+    let spki_der = spki.to_der().map_err(|err| {
+        error!(?err, "TPM: serialise SPKI to DER");
+        WebauthnError::X509DerInvalid
+    })?;
 
     match alg {
         COSEAlgorithm::ES256 => {
-            let verifier = EcdsaP256VerifyingKey::from_public_key_der(&spki_der)
-                .map_err(|err| {
+            let verifier =
+                EcdsaP256VerifyingKey::from_public_key_der(&spki_der).map_err(|err| {
                     error!(?err, "TPM: AIK SPKI is not P-256 ECDSA");
                     WebauthnError::EcdsaPointInvalid
                 })?;
             // P-256 signatures are 32+32 = 64 bytes raw r||s.
-            let signature = EcdsaP256Signature::from_slice(signature)
-                .map_err(|err| {
-                    error!(?err, "TPM: ES256 raw signature length");
-                    WebauthnError::SignatureInvalid
-                })?;
+            let signature = EcdsaP256Signature::from_slice(signature).map_err(|err| {
+                error!(?err, "TPM: ES256 raw signature length");
+                WebauthnError::SignatureInvalid
+            })?;
             Ok(verifier.verify(verification_data, &signature).is_ok())
         }
         COSEAlgorithm::ES384 => {
-            let verifier = EcdsaP384VerifyingKey::from_public_key_der(&spki_der)
-                .map_err(|err| {
+            let verifier =
+                EcdsaP384VerifyingKey::from_public_key_der(&spki_der).map_err(|err| {
                     error!(?err, "TPM: AIK SPKI is not P-384 ECDSA");
                     WebauthnError::EcdsaPointInvalid
                 })?;
             // P-384 signatures are 48+48 = 96 bytes raw r||s.
-            let signature = EcdsaP384Signature::from_slice(signature)
-                .map_err(|err| {
-                    error!(?err, "TPM: ES384 raw signature length");
-                    WebauthnError::SignatureInvalid
-                })?;
+            let signature = EcdsaP384Signature::from_slice(signature).map_err(|err| {
+                error!(?err, "TPM: ES384 raw signature length");
+                WebauthnError::SignatureInvalid
+            })?;
             Ok(verifier.verify(verification_data, &signature).is_ok())
         }
         COSEAlgorithm::RS256 => {
@@ -139,8 +135,8 @@ pub fn verify_tpm_signature(
             // 8017 §9.2). Same constant verify_signature uses for the
             // RsaS256+INSECURE_RS1 path on the assertion side.
             const SHA1_DIGEST_INFO_PREFIX: [u8; 15] = [
-                0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00,
-                0x04, 0x14,
+                0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00, 0x04,
+                0x14,
             ];
             let pub_key = RS256PublicKey::from_public_key_der(&spki_der).map_err(|err| {
                 error!(?err, "TPM: AIK SPKI is not RSA");

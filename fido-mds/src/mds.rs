@@ -618,7 +618,7 @@ pub enum AttestationFormat {
 ///
 /// Forward-compat note (2026-Q2 onward): FIDO Alliance keeps adding optional
 /// fields to this map (2026-Q1 added 9 fields; 2026-Q2 added `defaultCredProtect`
-/// + others not yet enumerated upstream). The struct intentionally drops
+/// and others not yet enumerated upstream). The struct intentionally drops
 /// `deny_unknown_fields` and absorbs unrecognized keys into a flattened
 /// overflow map so that a fresh field on the live blob does not break MDS3
 /// JWS deserialise mid-cycle. civid never reads these fields — they are
