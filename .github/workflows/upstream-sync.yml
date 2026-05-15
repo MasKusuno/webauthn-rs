@@ -1,0 +1,113 @@
+name: Upstream sync
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_REMOTE: https://github.com/kanidm/webauthn-rs.git
+  UPSTREAM_BRANCH: master
+  FORK_BRANCH: ml-dsa-verify-6.0
+  REBASE_BRANCH: automation/upstream-rebase
+
+jobs:
+  rebase:
+    name: Rebase ${{ env.FORK_BRANCH }} onto upstream/master
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.FORK_BRANCH }}
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream "$UPSTREAM_REMOTE"
+          git fetch upstream "$UPSTREAM_BRANCH"
+
+      - name: Check whether rebase is needed
+        id: check
+        run: |
+          UPSTREAM_TIP=$(git rev-parse "upstream/$UPSTREAM_BRANCH")
+          if git merge-base --is-ancestor "$UPSTREAM_TIP" HEAD; then
+            echo "needs_rebase=false" >> "$GITHUB_OUTPUT"
+            echo "Fork already includes upstream/$UPSTREAM_BRANCH ($UPSTREAM_TIP); nothing to do."
+          else
+            echo "needs_rebase=true" >> "$GITHUB_OUTPUT"
+            echo "upstream_tip=$UPSTREAM_TIP" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rebase onto upstream
+        id: rebase
+        if: steps.check.outputs.needs_rebase == 'true'
+        run: |
+          git checkout -B "$REBASE_BRANCH" "$FORK_BRANCH"
+          if git rebase "upstream/$UPSTREAM_BRANCH"; then
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+          else
+            git rebase --abort || true
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push rebase branch
+        if: steps.check.outputs.needs_rebase == 'true' && steps.rebase.outputs.conflict == 'false'
+        run: git push -f origin "$REBASE_BRANCH"
+
+      - name: Open PR
+        if: steps.check.outputs.needs_rebase == 'true' && steps.rebase.outputs.conflict == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh pr view "$REBASE_BRANCH" --json state --jq '.state' 2>/dev/null | grep -q OPEN; then
+            echo "PR already open for $REBASE_BRANCH; skipping create."
+            exit 0
+          fi
+          gh pr create \
+            --base "$FORK_BRANCH" \
+            --head "$REBASE_BRANCH" \
+            --title "automation: rebase ${FORK_BRANCH} onto kanidm/master" \
+            --body "Weekly upstream-sync run rebased \`${FORK_BRANCH}\` onto \`kanidm/webauthn-rs:${UPSTREAM_BRANCH}\` at upstream tip \`${{ steps.check.outputs.upstream_tip }}\`. Review the diff, then squash- or rebase-merge to keep linear history. The civid \`webauthn-rs-bump.yml\` will pick up the new tip on the next Monday 06:00 UTC run."
+
+      - name: Open / update conflict tracking issue
+        if: steps.check.outputs.needs_rebase == 'true' && steps.rebase.outputs.conflict == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_TIP: ${{ steps.check.outputs.upstream_tip }}
+        run: |
+          ISSUE_TITLE="upstream-sync: rebase conflict against kanidm/${UPSTREAM_BRANCH}"
+          EXISTING=$(gh issue list --label upstream-sync --state open --search "$ISSUE_TITLE" --json number --jq '.[0].number // empty')
+          BODY=$(cat <<EOF
+          Weekly upstream-sync rebase failed against \`kanidm/webauthn-rs:${UPSTREAM_BRANCH}\` (upstream tip \`${UPSTREAM_TIP}\`). Resolve manually:
+
+          \`\`\`
+          git fetch origin ${FORK_BRANCH}
+          git fetch ${UPSTREAM_REMOTE} ${UPSTREAM_BRANCH}
+          git checkout -B ${REBASE_BRANCH} origin/${FORK_BRANCH}
+          git rebase FETCH_HEAD
+          # resolve, then:
+          git push -f origin ${REBASE_BRANCH}
+          gh pr create --base ${FORK_BRANCH} --head ${REBASE_BRANCH}
+          \`\`\`
+
+          Triggered by: \`${{ github.workflow }}\` run \`${{ github.run_id }}\`.
+          EOF
+          )
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "$BODY"
+          else
+            gh issue create --title "$ISSUE_TITLE" --label upstream-sync --body "$BODY"
+          fi
