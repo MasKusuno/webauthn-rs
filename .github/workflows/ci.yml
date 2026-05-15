@@ -5,6 +5,9 @@ on:
 
 name: CI
 
+permissions:
+  contents: read
+
 env:
   VCPKG_ROOT: "${{ github.workspace }}/vcpkg"
   SCCACHE_GHA_ENABLED: "true"
