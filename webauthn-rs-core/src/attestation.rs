@@ -1104,9 +1104,13 @@ pub(crate) fn assert_tpm_attest_req(x509: &x509::Certificate) -> Result<(), Weba
         err
     })?;
     let manufacturer = san_data.manufacturer;
-    let (_, manufacturer_bytes) = tpm_device_attribute_parser(manufacturer.as_bytes())
-        .map_err(|err| {
-            warn!(manufacturer, ?err, "TPM AIK cert: manufacturer device-attribute parse failed");
+    let (_, manufacturer_bytes) =
+        tpm_device_attribute_parser(manufacturer.as_bytes()).map_err(|err| {
+            warn!(
+                manufacturer,
+                ?err,
+                "TPM AIK cert: manufacturer device-attribute parse failed"
+            );
             WebauthnError::ParseNOMFailure
         })?;
     let _vendor = TpmVendor::try_from(manufacturer_bytes).map_err(|err| {
