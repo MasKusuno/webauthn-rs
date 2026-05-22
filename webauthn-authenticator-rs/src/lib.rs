@@ -122,10 +122,10 @@ use crate::error::WebauthnCError;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64_ENGINE;
 use url::Url;
 
-use webauthn_rs_core::WebauthnCore;
 use webauthn_rs_proto::{
-    CreationChallengeResponse, PublicKeyCredential, PublicKeyCredentialCreationOptions,
-    PublicKeyCredentialRequestOptions, RegisterPublicKeyCredential, RequestChallengeResponse,
+    origin::origins_match, CreationChallengeResponse, PublicKeyCredential,
+    PublicKeyCredentialCreationOptions, PublicKeyCredentialRequestOptions,
+    RegisterPublicKeyCredential, RequestChallengeResponse,
 };
 
 pub mod prelude {
@@ -335,7 +335,7 @@ impl<T: AuthenticatorBackend + ?Sized> WebauthnAuthenticator for T {
                 WebauthnCError::Security
             })?;
 
-        if !WebauthnCore::origins_match(true, true, &origin, &rp_id_url) {
+        if !origins_match(true, true, &origin, &rp_id_url) {
             error!(
                 "Relying party ID ({rp_id_url}) is not a suffix of the effective domain ({origin})"
             );
@@ -409,7 +409,7 @@ impl<T: AuthenticatorBackend + ?Sized> WebauthnAuthenticator for T {
                 WebauthnCError::Security
             })?;
 
-        if !WebauthnCore::origins_match(true, true, &origin, &rp_id_url) {
+        if !origins_match(true, true, &origin, &rp_id_url) {
             error!(
                 "Relying party ID ({rp_id_url}) is not a suffix of the effective domain ({origin})"
             );
