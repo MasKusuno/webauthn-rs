@@ -861,9 +861,15 @@ impl COSEKey {
                 // fixed 64-byte octet string (32-byte R || 32-byte S),
                 // verified directly over `verification_data` (the message,
                 // not a digest — Ed25519 hashes internally via SHA-512).
+                //
+                // ed25519-dalek 3.x is built on `signature` v3, while
+                // crypto-glue 0.1 still exposes `signature` v2 via its
+                // `traits::Verifier`. We import the v3 trait locally so the
+                // resolver picks the correct `verify` impl on `VerifyingKey`.
+                use ed25519_dalek::Verifier as Ed25519Verifier;
                 let signature = Ed25519Signature::from_slice(signature)
                     .map_err(|_err| WebauthnError::SignatureInvalid)?;
-                Ok(verifier.verify(verification_data, &signature).is_ok())
+                Ok(Ed25519Verifier::verify(&verifier, verification_data, &signature).is_ok())
             }
         }
     }
@@ -876,10 +882,8 @@ impl COSEKey {
 /// with empty context, covering `authenticatorData || SHA256(clientDataJSON)`
 /// (for assertion) or the attestation-specific message (for attestation).
 ///
-/// REWRITE-ON-BUMP(ml-dsa>=0.1): watch for `VerifyingKey::decode` /
-/// `Signature::decode` / `verify_with_context` API renames when the crate
-/// bumps to 0.1.x. The `signature::Verifier::verify` trait call path is a
-/// more stable alternative; see lib.rs:626-632 in ml-dsa 0.0.4.
+/// Uses the `signature::Verifier` trait path rather than `verify_with_context`
+/// so the call survives future ml-dsa minor bumps without source changes.
 #[cfg(feature = "ml-dsa")]
 fn ml_dsa_verify_signature(
     cose_key: &COSEMlDsaKey,
