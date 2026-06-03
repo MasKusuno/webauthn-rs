@@ -16,7 +16,7 @@ env:
 
 jobs:
   rebase:
-    name: Rebase ${{ env.FORK_BRANCH }} onto upstream/master
+    name: Rebase ml-dsa-verify-6.0 onto upstream/master
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
