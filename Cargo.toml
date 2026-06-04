@@ -120,17 +120,18 @@ serde_cbor_2 = { version = "0.13.0" }
 # civid fork addition — see
 #   https://github.com/digital-go-jp/civid/issues/288 (ADR-008 PQC roadmap)
 #   https://github.com/digital-go-jp/civid/issues/290 (feature 027 PoC)
-# RustCrypto pure-Rust impl; v0.0.4 is unaudited per its README.
-# REWRITE-ON-BUMP(ml-dsa>=0.1): watch for VerifyingKey / Signature API renames
-# when the crate hits 0.1.x. Exact-version pin is intentional; bump requires
-# a follow-up PR touching every `REWRITE-ON-BUMP(ml-dsa>=0.1)` call site.
-ml-dsa = "=0.0.4"
+# RustCrypto pure-Rust impl; still self-described as "never been independently
+# audited" in the upstream README as of 0.1.0 (2026-05-17). Use verify-only.
+# 0.1.0 patches RUSTSEC-2025-0144 (timing side-channel in `decompose` during
+# signing) — not on our verify path, but moving forward to stay current.
+ml-dsa = "0.1"
 # Ed25519 / EdDSA verify path. crypto-glue 0.1.16 does not surface an
 # Ed25519 verifier (kanidm's 6.0 line punted the openssl ed25519 path
 # during the RustCrypto migration), so the fork pulls ed25519-dalek
 # directly into webauthn-rs-core. Verify-only — no signing surface.
-# RustCrypto pure-Rust impl, audited 1.x.
-ed25519-dalek = { version = "2.2", default-features = false, features = ["fast", "zeroize"] }
+# RustCrypto pure-Rust impl. 3.0.0-rc.0 tracks the `signature` v3 ecosystem
+# in lockstep with ml-dsa 0.1; verify-only API surface is unchanged.
+ed25519-dalek = { version = "3.0.0-rc.0", default-features = false, features = ["fast", "zeroize"] }
 serde_json = "^1.0.145"
 serde_with = { version = "3.16.1", features = ["base64", "macros"] }
 rand = "0.9.2"
