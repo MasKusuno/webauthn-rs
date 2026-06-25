@@ -247,6 +247,7 @@ jobs:
           cargo ${{ matrix.rust_version == 'nightly' && '+nightly' || '' }} doc \
             --all \
             --exclude fido-key-manager \
+            --features webauthn-authenticator-rs/ctap2 \
             --no-deps \
             --document-private-items
         env:
