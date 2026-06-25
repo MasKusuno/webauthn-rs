@@ -1,7 +1,7 @@
 use crate::error::WebauthnError;
 use crate::startup::AppState;
 use axum::{
-    extract::{Extension, Json, Path},
+    extract::{Json, Path, State},
     http::StatusCode,
     response::IntoResponse,
 };
@@ -50,7 +50,7 @@ use webauthn_rs::prelude::*;
 // the challenge to the browser.
 
 pub async fn start_register(
-    Extension(app_state): Extension<AppState>,
+    State(app_state): State<AppState>,
     session: Session,
     Path(username): Path<String>,
 ) -> Result<impl IntoResponse, WebauthnError> {
@@ -118,7 +118,7 @@ pub async fn start_register(
 // to verify these and persist them.
 
 pub async fn finish_register(
-    Extension(app_state): Extension<AppState>,
+    State(app_state): State<AppState>,
     session: Session,
     Json(reg): Json<RegisterPublicKeyCredential>,
 ) -> Result<impl IntoResponse, WebauthnError> {
@@ -189,7 +189,7 @@ pub async fn finish_register(
 // The user indicates the wish to start authentication and we need to provide a challenge.
 
 pub async fn start_authentication(
-    Extension(app_state): Extension<AppState>,
+    State(app_state): State<AppState>,
     session: Session,
     Path(username): Path<String>,
 ) -> Result<impl IntoResponse, WebauthnError> {
@@ -246,7 +246,7 @@ pub async fn start_authentication(
 // this is an authentication failure.
 
 pub async fn finish_authentication(
-    Extension(app_state): Extension<AppState>,
+    State(app_state): State<AppState>,
     session: Session,
     Json(auth): Json<PublicKeyCredential>,
 ) -> Result<impl IntoResponse, WebauthnError> {

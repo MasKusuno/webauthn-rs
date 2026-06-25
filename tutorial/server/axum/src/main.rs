@@ -1,4 +1,4 @@
-use axum::{extract::Extension, http::StatusCode, response::IntoResponse, routing::post, Router};
+use axum::{http::StatusCode, response::IntoResponse, routing::post, Router};
 use std::net::SocketAddr;
 #[cfg(feature = "wasm")]
 use std::path::PathBuf;
@@ -51,7 +51,6 @@ async fn main() {
         .route("/register_finish", post(finish_register))
         .route("/login_start/:username", post(start_authentication))
         .route("/login_finish", post(finish_authentication))
-        .layer(Extension(app_state))
         .layer(
             SessionManagerLayer::new(session_store)
                 .with_name("webauthnrs")
@@ -59,7 +58,8 @@ async fn main() {
                 .with_secure(false) // TODO: change this to true when running on an HTTPS/production server instead of locally
                 .with_expiry(Expiry::OnInactivity(Duration::seconds(360))),
         )
-        .fallback(handler_404);
+        .fallback(handler_404)
+        .with_state(app_state);
 
     #[cfg(feature = "wasm")]
     if !PathBuf::from("./assets/wasm").exists() {

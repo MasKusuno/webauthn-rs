@@ -10,7 +10,7 @@ authors = ["Niklas Pfister <git@omikron.dev>"]
 # Webframework
 actix-web = { version = ">=4.5.1" }
 # Session framework for actix-web
-actix-session = { version = "~0.10", features = ["cookie-session"] }
+actix-session = { version = "~0.11", features = ["cookie-session"] }
 
 # Serve static file. Used to serve wasm
 actix-files = { version = "~0.6" }
