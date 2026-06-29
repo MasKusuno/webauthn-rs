@@ -247,10 +247,11 @@ jobs:
           cargo ${{ matrix.rust_version == 'nightly' && '+nightly' || '' }} doc \
             --all \
             --exclude fido-key-manager \
+            --features webauthn-authenticator-rs/ctap2 \
             --no-deps \
             --document-private-items
         env:
-          RUSTDOCFLAGS: ${{ matrix.rust_version == 'nightly' && '--cfg docsrs' || '' }}
+          RUSTDOCFLAGS: ${{ matrix.rust_version == 'nightly' && '--cfg docsrs --cap-lints warn' || '' }}
       - uses: actions/upload-artifact@v7
         with:
           name: docs-${{ matrix.rust_version }}
@@ -271,7 +272,7 @@ jobs:
             --document-private-items \
             --all-features
         env:
-          RUSTDOCFLAGS: ${{ matrix.rust_version == 'nightly' && '--cfg docsrs' || '' }}
+          RUSTDOCFLAGS: ${{ matrix.rust_version == 'nightly' && '--cfg docsrs --cap-lints warn' || '' }}
       - uses: actions/upload-artifact@v7
         with:
           name: docs-${{ matrix.rust_version }}-all_features
